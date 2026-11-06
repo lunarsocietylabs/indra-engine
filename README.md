@@ -11,19 +11,24 @@ Built by **Lunar Society Labs** (research department of Lunar Society Technologi
 1. Builds a suffix array + LCP over the whole text (no word segmentation, no quote marks needed).
 2. **Matching statistics**: one scan gives, for every position of a commentary, the longest passage it shares with a target sutra.
 3. **Attribution**: a passage that has a *longer* match in another sutra is attributed to that other sutra, not this one.
-4. **Order chain**: commentaries follow the sutra in order, so a passage must lie near its neighbouring reliable anchors in the sutra.
+4. **Lemma walk (v3)**: commentaries walk through the sutra in order. Long passages that agree in order with a neighbour become confirmed anchors (co-linear chaining, as in genome alignment). A short fragment must fall inside the sutra interval *between* its two flanking anchors, and is accepted only if its **expected chance count** is small: `E = f(s) × B`, where `f(s)` is the string's frequency in a large background of Buddhist prose and `B` is the interval length. Tight intervals let common phrases through; loose ones demand rare strings. Commentators' citation markers (X者, 從X下, 至X …) relax the threshold.
 5. **Self-measured error rate, no human labels**: the same rules are run on texts that cannot cite the target (Agama collections vs. Mahayana sutras); their hit density is the noise floor. Recall is measured against passages the commentators themselves put in quotation marks.
 
 Only verbatim text is ever reported. Nothing here is generated or guessed by a model.
 
-## Results so far (a 5.25M-character sample, one CPU, 68 s)
+## Results so far (a 5.25M-character sample, free CI runner, about 1 minute)
 
-| Target | Hits | Estimated precision | Recall vs. quoted passages | Found beyond quote-based matching |
+Precision is estimated three independent ways (two Agama collections that cannot cite Mahayana sutras, and commentaries on a different sutra); recall is against passages the commentators themselves quoted.
+
+| Target | Version | Hits | Est. precision (中阿含 / 增一 / cross) | Recall |
 |---|---|---|---|---|
-| Heart Sutra (63 commentaries) | 3,186 | 1.000 | 0.877 | 2,872 |
-| Lotus Sutra (4 commentaries) | 6,109 | 0.943 | 0.676 | 3,926 |
+| Heart Sutra (63 commentaries) | v1 | 3,455 | 1.000 | 0.911 |
+| | **v3** | 3,796 | **0.993 / 0.989 / 0.990** | **0.955** |
+| Lotus Sutra (4 commentaries) | v1 | 5,701 | 0.956 (combined) | 0.652 |
+| | v2 | 7,620 | 0.903 / 0.782 / 0.943 | 0.817 |
+| | **v3** | 7,351 | **0.976 / 0.963 / 0.972** | **0.866** |
 
-These are estimates from a sample, not a full-canon evaluation. Known weaknesses: Lotus recall is low because its commentaries quote in 4–8 character fragments; variant characters are not yet unified; commentaries on commentaries are not yet linked to the commentary they explain. See `indra/suffix_experiment.py` for the exact rules.
+v3 = `lemma_walk(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=5)`. These are estimates from a sample, not a full-canon evaluation. Known weaknesses: string frequencies come from a ~3.5M-character background, so strings that straddle word boundaries look rarer than they are; variant characters are not yet unified; commentaries on commentaries are not yet linked. See `indra/lemma_walk.py` and `indra/suffix_experiment.py`.
 
 ## Run it
 

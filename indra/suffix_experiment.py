@@ -30,7 +30,7 @@ from .norm import norm
 
 SITE = os.environ.get("INDRA_SITE", "")   # base URL of a corpus server exposing /data/manifest.json and /data/search/<id>.json
 FINAL_W, FINAL_NMIN, FINAL_OCC = 0.012, 2, 10
-V3_MAIN = "α=0.01 +牒经扩展×10"     # 最终采用的参数（由扫描结果选定）
+V3_MAIN = "α=0.01 +牒经扩展×5"     # 最终采用的参数（由扫描结果选定）
 SEP0 = 0xE000                      # 私用区：每部文献一个独有的结尾符
 
 
