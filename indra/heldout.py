@@ -98,6 +98,43 @@ def fetch():
     return out
 
 
+def one_sub_diagnostic(C, cf, tstr, minlen=6, maxlen=24):
+    """注疏「」明引中，经文里找不到原样、但改一个字就能找到的片段：数量 + 最常见的替换字对。"""
+    tot = exact = one = 0
+    pairs, docs_of = collections.Counter(), collections.defaultdict(set)
+    seen = set()
+    for d in C.docs:
+        if d["fam"] != cf:
+            continue
+        for raw in d["praw"]:
+            for frag, src, _ in extract_fragments(raw):
+                if src != "quote" or not (minlen <= len(frag) <= maxlen) or (d["id"], frag) in seen:
+                    continue
+                seen.add((d["id"], frag))
+                tot += 1
+                if frag in tstr:
+                    exact += 1; continue
+                h = len(frag) // 2
+                found = None
+                for half, off in ((frag[:h], 0), (frag[h:], h)):
+                    j = tstr.find(half)
+                    while j >= 0 and found is None:
+                        st = j - off
+                        cand = tstr[st:st + len(frag)] if st >= 0 else ""
+                        if len(cand) == len(frag):
+                            diff = [k for k in range(len(frag)) if cand[k] != frag[k]]
+                            if len(diff) == 1:
+                                found = (frag[diff[0]], cand[diff[0]])
+                        j = tstr.find(half, j + 1)
+                    if found:
+                        break
+                if found:
+                    one += 1
+                    pairs[found] += 1; docs_of[found].add(d["id"])
+    top = [f"{a}→{b} ×{n}（{len(docs_of[(a, b)])}部）" for (a, b), n in pairs.most_common(25)]
+    return {"quotes_6_24": tot, "exact": exact, "one_sub": one, "top_pairs": top}
+
+
 def run(outdir, docs=None):
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
@@ -162,6 +199,7 @@ def run(outdir, docs=None):
                     bgc[x["s"]] = int(bg_mask[sa_np[lo:hi]].sum()) if hi > lo else 0
         tstr = C.text[target["start"]:target["end"]]
         cf = "com:" + fam
+        R.setdefault("variants", {})[tname] = one_sub_diagnostic(C, cf, tstr)
         gold = []
         for d in C.docs:
             if d["fam"] != cf:
@@ -231,6 +269,9 @@ def report(R):
         L.append(f"| {r['target']} | {r['tier']} | {r['commentaries']} | {r['com_chars']:,} | {r['hits']} | {r['per10k']} | "
                  + " | ".join(str(r.get(k, "")) for k in nk) + f" | {r['cross_lb']} | {r['gold']} | {r['recall']} |")
     L += [f"- {r['target']}：{r['error']}" for r in R["rows"] if "error" in r]
+    for t, v in R.get("variants", {}).items():
+        L += ["", f"### {t}：「」明引（6–24 字）{v['quotes_6_24']} 条；经中原样可见 {v['exact']}；改一字可见 {v['one_sub']}",
+              "注疏字→经文字（出现次数，涉及几部注疏）：" + "；".join(v["top_pairs"])]
     for t, xs in R["samples"].items():
         L += ["", f"### {t}：确定层里、注疏没加引号的短片段（抽样）"] + [f"- {e}" for e in xs]
     for t, xs in R["null_samples"].items():
