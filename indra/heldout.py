@@ -58,6 +58,11 @@ def matching_stats_mask(sa, lcp, mask):
     return ms
 
 
+def active_targets():
+    only = os.environ.get("INDRA_ONLY")
+    return [t for t in TARGETS if not only or t[0] in only.split(",")]
+
+
 def fetch():
     import requests, concurrent.futures
     if not SITE:
@@ -65,11 +70,11 @@ def fetch():
     man = requests.get(f"{SITE}/data/manifest.json", timeout=180).json()
     allm = man.get("docs", man) if isinstance(man, dict) else man
     meta = {d["doc_id"]: d for d in allm if d.get("doc_id")}
-    sutra_ids = {t[1] for t in TARGETS} | set(OTHER_SUTRAS)
+    sutra_ids = {t[1] for t in active_targets()} | set(OTHER_SUTRAS)
     plan = [(did, "sutra:" + did) for did in sorted(sutra_ids)]
     plan += [(d, "bg") for d in BG] + [(d, "null") for d in NULL]
     taken = set(sutra_ids)
-    for fam, _, _, pick in TARGETS:
+    for fam, _, _, pick in active_targets():
         for did in sorted(meta):
             m = meta[did]
             t = m.get("title") or ""
@@ -97,6 +102,13 @@ def fetch():
                 continue
             used[d["fam"]] += n
         out.append(d)
+    for d in out:                       # 《心經》卷首有明代御制序：经文正文自「觀自在菩薩」起
+        if d["id"] == "T08n0251":
+            for i, (lb, t) in enumerate(d["paras"]):
+                if "觀自在菩薩" in t:
+                    j = t.index("觀自在菩薩")
+                    d["paras"] = [(lb, t[j:])] + d["paras"][i + 1:]
+                    break
     return out
 
 
@@ -137,7 +149,7 @@ def one_sub_diagnostic(C, cf, tstr, minlen=6, maxlen=24):
     return {"quotes_6_24": tot, "exact": exact, "one_sub": one, "top_pairs": top}
 
 
-def run(outdir, docs=None, full=None):
+def run(outdir, docs=None, full=None, export_dir=None):
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
     docs = docs or fetch()
@@ -156,9 +168,9 @@ def run(outdir, docs=None, full=None):
     sutra_docs = [d for d in C.docs if d["fam"].startswith("sutra:")]
     null_docs = [d for d in C.docs if d["fam"] == "null"]
     fam_ms = {}
-    for f in ["com:" + t[0] for t in TARGETS] + ["null"]:
+    for f in ["com:" + t[0] for t in active_targets()] + ["null"]:
         fam_ms[f] = family_matching_stats(C, sa, lcp, f)
-    for fam, tid, tname, _ in TARGETS:
+    for fam, tid, tname, _ in active_targets():
         if tid not in by_id or not any(d["fam"] == "com:" + fam for d in C.docs):
             R["rows"].append({"target": tname, "error": "missing sutra or commentaries"}); continue
         t1 = time.time()
@@ -179,7 +191,7 @@ def run(outdir, docs=None, full=None):
                 bg_mask[d["start"]:d["end"]] = True
         nbg = int(bg_mask.sum())
         msc = matching_stats_mask(sa, lcp, comp_mask)
-        fams = ["com:" + f for f, *_ in TARGETS] + ["null"]
+        fams = ["com:" + f for f, *_ in active_targets()] + ["null"]
         spans = {f: spans_for(C, ms, None, f, target) for f in fams}
 
         def attribution(x):
@@ -254,6 +266,10 @@ def run(outdir, docs=None, full=None):
             row["gold"] = len(gold)
             row["recall"] = round(hit / max(1, len(gold)), 3)
             R["rows"].append(row)
+            if export_dir and tier == "确定层":
+                from .lemma_export import export
+                pairs = [(x, acc[cf][id(x)]) for x in acc_c]
+                R.setdefault("exports", []).append(export(C, target, pairs, export_dir, tid, tname))
             if tier == "确定层":
                 gm = collections.defaultdict(set)
                 for d, g, L in gold:
@@ -303,6 +319,7 @@ def report(R):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/tmp/heldout")
+    ap.add_argument("--export", default=None, help="write clause-level lemma JSON for each active target here")
     ap.add_argument("--full", action="store_true", help="also build the whole-canon index and use it as background")
     a = ap.parse_args()
     full = None
@@ -311,7 +328,7 @@ if __name__ == "__main__":
         full = FullCanon()
         st = full.stats()
         print("FULLCANON", json.dumps(st, ensure_ascii=False), flush=True)
-    R = run(a.out, full=full)
+    R = run(a.out, full=full, export_dir=a.export)
     if full is not None:
         R["fullcanon"] = st
         json.dump(R, open(os.path.join(a.out, "heldout.json"), "w"), ensure_ascii=False, indent=1)
