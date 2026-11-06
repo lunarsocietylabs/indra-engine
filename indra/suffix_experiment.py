@@ -298,7 +298,8 @@ def run(outdir, docs=None):
                 x["attr"] = attribution(x)
             pair_spans[(fam, tname)] = sp
 
-    from .lemma_walk import background_counts, lemma_walk
+    from .lemma_walk import background_counts, lemma_walk, family_matching_stats, propagate
+    fam_ms = {}
     t1 = time.time()
     sa_np = np.asarray(sa, dtype=np.int64)
     _strs = {x["s"] for sp in pair_spans.values() for x in sp}
@@ -431,6 +432,14 @@ def run(outdir, docs=None):
             acc_c = evaluate(name, set(ac), set(an), set(aa))
             if name == V3_MAIN:
                 v3_main = (acc_c, why_c)
+                for f in (cf, nf, "null"):
+                    if f not in fam_ms:
+                        fam_ms[f] = family_matching_stats(C, sa, lcp, f)
+                for L0 in (16, 24):
+                    pc = propagate(C, cf, pair_spans[(cf, tname)], ac, fam_ms[cf], L0=L0)
+                    pn_ = propagate(C, nf, pair_spans[(nf, tname)], an, fam_ms[nf], L0=L0)
+                    pa_ = propagate(C, "null", pair_spans[("null", tname)], aa, fam_ms["null"], L0=L0)
+                    evaluate(f"{name} +复注传递(≥{L0}字)", set(pc), set(pn_), set(pa_))
         if v3_main:
             acc_c, why_c = v3_main
             mask = {did: bytearray(len(v)) for did, v in gold_mask.items()}

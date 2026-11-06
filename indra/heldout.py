@@ -17,7 +17,7 @@ import numpy as np
 from .norm import norm
 from .short_quote import extract_fragments
 from .suffix_experiment import Corpus, suffix_array, kasai, sa_range, spans_for, ctx
-from .lemma_walk import lemma_walk
+from .lemma_walk import lemma_walk, family_matching_stats, propagate
 
 SITE = os.environ.get("INDRA_SITE", "")
 TARGETS = [
@@ -116,6 +116,9 @@ def run(outdir, docs=None):
     by_id = {d["id"]: d for d in C.docs}
     sutra_docs = [d for d in C.docs if d["fam"].startswith("sutra:")]
     null_docs = [d for d in C.docs if d["fam"] == "null"]
+    fam_ms = {}
+    for f in ["com:" + t[0] for t in TARGETS] + ["null"]:
+        fam_ms[f] = family_matching_stats(C, sa, lcp, f)
     for fam, tid, tname, _ in TARGETS:
         if tid not in by_id or not any(d["fam"] == "com:" + fam for d in C.docs):
             R["rows"].append({"target": tname, "error": "missing sutra or commentaries"}); continue
@@ -170,8 +173,13 @@ def run(outdir, docs=None):
                         j = pn.find(frag)
                         if j >= 0:
                             gold.append((d, d["pstarts"][i] + j, len(frag)))
+        tiers = []
         for tier, kw in FROZEN.items():
             acc = {f: lemma_walk(spans[f], N_T, bgc, C.text, nbg, **kw)[0] for f in fams}
+            tiers.append((tier, acc))
+            if tier == "确定层":
+                tiers.append(("确定层+复注传递", {f: propagate(C, f, spans[f], acc[f], fam_ms[f]) for f in fams}))
+        for tier, acc in tiers:
             acc_c = [x for x in spans[cf] if id(x) in acc[cf]]
             dc = len(acc_c) / max(1, fam_chars[cf]) * 1e4
             row = {"target": tname, "tier": tier, "commentaries": sum(1 for d in C.docs if d["fam"] == cf),

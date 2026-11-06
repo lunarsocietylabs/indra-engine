@@ -131,3 +131,93 @@ def lemma_walk(spans, N_T, bgc, text, nbg, alpha=0.03, lemma=False, lemma_k=5, l
         if grow and newly:
             bracket_pass(sorted(anchors + newly))
     return acc, why
+
+
+# ------------------------------------------------------------------ 复注传递（疏与疏之间）
+def family_matching_stats(C, sa, lcp, fam):
+    """同族内每个位置与"另一部"同族文献的最长公共前缀及对方位置（一次 SA 双向扫描，记住最近两部不同文献）。"""
+    n = len(sa)
+    dl = [-1] * len(C.text)
+    for i, d in enumerate(C.docs):
+        if d["fam"] == fam:
+            dl[d["start"]:d["end"]] = [i] * (d["end"] - d["start"])
+    ms = [0] * len(C.text); pt = [-1] * len(C.text)
+    BIG = 1 << 30
+    for direction in (1, -1):
+        c1 = c2 = 0; d1 = d2 = -1; p1 = p2 = -1
+        rng = range(n) if direction == 1 else range(n - 1, -1, -1)
+        for k in rng:
+            if d1 >= 0:
+                l = lcp[k] if direction == 1 else lcp[k + 1]
+                if l < c1: c1 = l
+                if l < c2: c2 = l
+            s = sa[k]
+            d = dl[s]
+            if d < 0:
+                continue
+            if d1 >= 0 and d1 != d:
+                v, q = c1, p1
+            elif d1 == d and d2 >= 0:
+                v, q = c2, p2
+            else:
+                v, q = 0, -1
+            if v > ms[s]:
+                ms[s], pt[s] = v, q
+            if d == d1:
+                c1, p1 = BIG, s
+            else:
+                c2, d2, p2 = c1, d1, p1
+                c1, d1, p1 = BIG, d, s
+    return ms, pt
+
+
+def propagate(C, fam, spans, acc, fms, L0=16, rounds=2):
+    """疏 A 与疏 B 有 ≥L0 字逐字相同的一段（A 在转引 B）：B 在这段里已确认的经文链接，A 同位置继承。"""
+    ms, pt = fms
+    acc = dict(acc)
+    by = collections.defaultdict(list)
+    for x in spans:
+        by[x["doc"]["id"]].append(x)
+    for v in by.values():
+        v.sort(key=lambda x: x["p"])
+    pos = {k: [x["p"] for x in v] for k, v in by.items()}
+    runs = []
+    for d in C.docs:
+        if d["fam"] != fam:
+            continue
+        for p in range(d["start"], d["end"]):
+            m = min(ms[p], d["end"] - p)
+            if m < L0 or (p > d["start"] and ms[p - 1] >= m + 1):
+                continue
+            runs.append((d["id"], p, pt[p], m))
+
+    def cover(did, a, L):
+        xs = by.get(did)
+        if not xs:
+            return None
+        k = bisect.bisect_right(pos[did], a) - 1
+        for j in range(k, max(-1, k - 8), -1):
+            if xs[j]["p"] <= a and xs[j]["p"] + xs[j]["m"] >= a + L:
+                return xs[j]
+        return None
+    for _ in range(rounds):
+        new = {}
+        for did, p, q, m in runs:
+            bid = C.doc_of(q)["id"]
+            xsB = by.get(bid)
+            if not xsB:
+                continue
+            for j in range(bisect.bisect_left(pos[bid], q), len(xsB)):
+                y = xsB[j]
+                if y["p"] >= q + m:
+                    break
+                if id(y) not in acc or y["p"] + y["m"] > q + m:
+                    continue
+                a = p + (y["p"] - q)
+                x = cover(did, a, y["m"])
+                if x is not None and id(x) not in acc and id(x) not in new:
+                    new[id(x)] = acc[id(y)] - (a - x["p"])
+        if not new:
+            break
+        acc.update(new)
+    return acc
