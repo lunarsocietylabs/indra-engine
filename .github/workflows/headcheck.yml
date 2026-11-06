@@ -1,0 +1,11 @@
+name: headcheck
+# Manual only. Prints response headers of public site URLs (free runner).
+on: {workflow_dispatch: {}}
+jobs:
+  head:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - run: |
+          for u in https://zelizuli.com/ https://zelizuli.com/app.js https://zelizuli.com/style.css https://zelizuli.com/data/lemma-preview/index.html https://zelizuli.com/data/lemma-preview/T08n0251.json; do
+            echo "== $u"; curl -sI -L --max-time 30 "$u" | grep -iE "^HTTP|^content-type|^content-disposition|^cache-control"; done
