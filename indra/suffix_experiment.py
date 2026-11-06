@@ -378,6 +378,54 @@ def run(outdir, docs=None):
         R.setdefault("other_samples", {})[tname] = [
             {"doc": x["doc"]["id"], "len": x["m"], "text": x["s"], "ctx": ctx(x["doc"]["praw"][C.para_of(x["doc"], x["p"])], x["s"])}
             for x in pair_spans[(cf, tname)] if x["attr"] == "other" and RULES["L≥4+专属"](x["m"], len(x["occ"]), x["bg"])][:8]
+        # ---- miss analysis: 为什么这些明引片段没被找回（规则 L≥4+专属，去别部经+顺序链）
+        spans_all = pair_spans[(cf, tname)]
+        acc = [x for x in spans_all if RULES["L≥4+专属"](x["m"], len(x["occ"]), x["bg"]) and x["attr"] != "other" and x.get("chain") is True]
+        mask = {did: bytearray(len(v)) for did, v in gold_mask.items()}
+        for x in acc:
+            st = x["doc"]["start"]; a_ = x["p"] - st
+            mask[x["doc"]["id"]][a_:a_ + x["m"]] = b"\x01" * x["m"]
+        by_doc_sp = collections.defaultdict(list)
+        for x in spans_all:
+            by_doc_sp[x["doc"]["id"]].append(x)
+        for v in by_doc_sp.values():
+            v.sort(key=lambda x: x["p"])
+        reasons, bylen, msamples = collections.Counter(), collections.defaultdict(collections.Counter), collections.defaultdict(list)
+        for did, g, L_ in gold:
+            st = C.doc_of(g)["start"]
+            if b"\x00" not in mask[did][g - st:g - st + L_]:
+                continue
+            xs = by_doc_sp.get(did, [])
+            ps = [x["p"] for x in xs]
+            k = bisect.bisect_right(ps, g) - 1
+            cov = None
+            for j in range(max(0, k - 4), min(len(xs), k + 5)):
+                if xs[j]["p"] <= g and xs[j]["p"] + xs[j]["m"] >= g + L_:
+                    cov = xs[j]; break
+            if cov is None:
+                why = "no_cover"
+            elif cov["attr"] == "other":
+                why = "other_sutra"
+            elif cov["m"] < 8 and cov["bg"] > 0:
+                why = "agama_common"
+            elif cov["m"] < 8 and len(cov["occ"]) > 3:
+                why = "occ>3"
+            elif cov.get("chain") is None:
+                why = "chain_no_anchor"
+            elif cov.get("chain") is False:
+                why = "chain_far"
+            else:
+                why = "other"
+            reasons[why] += 1
+            bk = "4" if L_ == 4 else "5" if L_ == 5 else "6" if L_ == 6 else "7" if L_ == 7 else "8-11" if L_ < 12 else "12+"
+            bylen[bk][why] += 1
+            if len(msamples[why]) < 6:
+                d_ = C.doc_of(g)
+                pi_ = C.para_of(d_, g)
+                msamples[why].append({"doc": did, "lb": d_["plbs"][pi_], "len": L_, "occ": len(cov["occ"]) if cov else 0,
+                                      "text": C.text[g:g + L_], "ctx": ctx(d_["praw"][pi_], C.text[g:g + L_])})
+        R.setdefault("miss", {})[tname] = {"total_missed": sum(reasons.values()), "reasons": dict(reasons),
+                                           "by_len": {k_: dict(v_) for k_, v_ in sorted(bylen.items())}, "samples": dict(msamples)}
         gold_report[tname] = len(gold)
     R["rules"] = table
 
@@ -499,6 +547,14 @@ def report(R):
           "| 目标 | 文献 | 作者 | 段落 | 锚定 | 插值 | 覆盖率 |", "|---|---|---|---|---|---|---|"]
     for r in sorted(R["coverage"], key=lambda r: (r["target"], -r["coverage"])):
         L.append(f"| {r['target']} | {r['doc']} {r['title']} | {r['author']} | {r['paras']} | {r['anchored']} | {r['interpolated']} | {r['coverage']} |")
+    L += ["", "## 召回缺口分析（明引片段为何没找回；规则 L≥4+专属，去别部经+顺序链）", ""]
+    for t, m in R.get("miss", {}).items():
+        L.append(f"### {t}：漏 {m['total_missed']} 条；原因 {m['reasons']}")
+        L.append(f"按引文字数分布：{m['by_len']}")
+        for why, xs in m["samples"].items():
+            L.append(f"- 样例 [{why}]")
+            L += [f"  - {x['doc']}:{x['lb']}（{x['len']}字，经内出现{x['occ']}次）…{x['ctx']}…" for x in xs]
+        L.append("")
     L += ["", "## 无引号命中样例（引号方法找不到的）", ""]
     for did, ex in R["samples_unquoted"].items():
         for e in ex:
