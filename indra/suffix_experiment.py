@@ -30,7 +30,7 @@ from .norm import norm
 
 SITE = os.environ.get("INDRA_SITE", "")   # base URL of a corpus server exposing /data/manifest.json and /data/search/<id>.json
 FINAL_W, FINAL_NMIN, FINAL_OCC = 0.012, 2, 10
-V3_MAIN = "α=0.03"     # 最终采用的参数（由扫描结果选定）
+V3_MAIN = "α=0.01 +牒经扩展×10"     # 最终采用的参数（由扫描结果选定）
 SEP0 = 0xE000                      # 私用区：每部文献一个独有的结尾符
 
 
@@ -416,10 +416,13 @@ def run(outdir, docs=None):
         evaluate("v2（对照）", {id(x) for x in pair_spans[(cf, tname)] if accept_v2(x)},
                  {id(x) for x in pair_spans[(nf, tname)] if accept_v2(x)},
                  {id(x) for x in pair_spans[("null", tname)] if accept_v2(x)})
-        V3 = [("α=0.01", dict(alpha=0.01)), ("α=0.03", dict(alpha=0.03)), ("α=0.1", dict(alpha=0.1)), ("α=0.3", dict(alpha=0.3)),
-              ("α=0.03 +牒经句式", dict(alpha=0.03, lemma=True)), ("α=0.1 +牒经句式", dict(alpha=0.1, lemma=True)),
-              ("α=0.03 不生长", dict(alpha=0.03, grow=False)), ("α=0.03 种子不限频度", dict(alpha=0.03, seed_E=1e9)),
-              ("α=0.03 单侧区间300", dict(alpha=0.03, one_side=300))]
+        V3 = [("α=0.01", dict(alpha=0.01)), ("α=0.03", dict(alpha=0.03)), ("α=0.1", dict(alpha=0.1)),
+              ("α=0.01 +牒经×5", dict(alpha=0.01, lemma=True)),
+              ("α=0.01 +牒经扩展×5", dict(alpha=0.01, lemma=True, lemma_ext=True)),
+              ("α=0.01 +牒经扩展×10", dict(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=10)),
+              ("α=0.01 +牒经扩展×30", dict(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=30)),
+              ("α=0.003 +牒经扩展×30", dict(alpha=0.003, lemma=True, lemma_ext=True, lemma_k=30)),
+              ("α=0.03 +牒经扩展×10", dict(alpha=0.03, lemma=True, lemma_ext=True, lemma_k=10))]
         v3_main = None
         for name, kw in V3:
             ac, why_c = lemma_walk(pair_spans[(cf, tname)], N_T, bgc, C.text, nbg, **kw)

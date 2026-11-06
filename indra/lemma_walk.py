@@ -37,13 +37,19 @@ def background_counts(C, sa, sa_np, strings, sa_range, fams=("comp", "bg")):
     return out, nbg
 
 
-LEMMA_PRE = ("經云", "文云", "經曰", "偈云", "下云", "故云", "所謂")
+LEMMA_PRE2 = ("經云", "文云", "經曰", "偈云", "下云", "故云", "所謂", "次從", "初從", "言從")
+LEMMA_PRE1 = ("從", "至", "訖", "次", "言", "云", "曰")
+LEMMA_POST = ("者", "下", "去", "已下", "以下", "等")
 
 
-def lemma_mark(text, x):
-    """疏家"牒经"句式：X者 / 經云X / 文云X …（标点已去，只看字）。"""
+def lemma_mark(text, x, ext=True):
+    """疏家"牒经/科判"句式（标点已去，只看字）：X者、經云X；扩展：從X下、至X、X去、X已下……"""
     p, m = x["p"], x["m"]
-    return text[p + m:p + m + 1] == "者" or text[max(0, p - 2):p] in LEMMA_PRE
+    if text[p + m:p + m + 1] == "者" or text[max(0, p - 2):p] in LEMMA_PRE2:
+        return True
+    if not ext:
+        return False
+    return text[p - 1:p] in LEMMA_PRE1 or text[p + m:p + m + 1] in LEMMA_POST or text[p + m:p + m + 2] in LEMMA_POST
 
 
 def _confirm(seeds, Gc, Gt, h=40):
@@ -63,7 +69,7 @@ def _confirm(seeds, Gc, Gt, h=40):
     return [seeds[k] for k in sorted(ok)]
 
 
-def lemma_walk(spans, N_T, bgc, text, nbg, alpha=0.03, lemma=False, grow=True, seed_E=1.0,
+def lemma_walk(spans, N_T, bgc, text, nbg, alpha=0.03, lemma=False, lemma_k=5, lemma_ext=False, grow=True, seed_E=1.0,
                Gc=3000, Gt_frac=0.05, delta=60, one_side=600):
     """期望偶然数 E = f(s) × B：
          f(s) = (背景出现次数 + 经内出现次数) / (背景字数 + 经长) —— 这个字串在佛典语言中的一般频度；
@@ -109,7 +115,7 @@ def lemma_walk(spans, N_T, bgc, text, nbg, alpha=0.03, lemma=False, grow=True, s
                     if nxt:
                         iv.append((nxt[1] - one_side, nxt[1] + nxt[2] + delta))
                 inb = [t for t in x["occ"] if any(a <= t and t + x["m"] <= b for a, b in iv)]
-                thr = alpha * (5 if lemma and lemma_mark(text, x) else 1)
+                thr = alpha * (lemma_k if lemma and lemma_mark(text, x, lemma_ext) else 1)
                 if inb:
                     B = sum(b - a for a, b in iv)
                     if f(x) * B <= thr:
