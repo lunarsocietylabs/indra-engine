@@ -1,0 +1,17 @@
+name: probe
+# Manual only. Read-only size probe of the corpus server.
+on:
+  workflow_dispatch:
+    inputs:
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+concurrency: {group: "${{ github.workflow }}", cancel-in-progress: true}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input requests
+      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.probe_size
