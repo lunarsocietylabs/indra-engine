@@ -29,7 +29,8 @@ import numpy as np
 from .norm import norm
 
 SITE = os.environ.get("INDRA_SITE", "")   # base URL of a corpus server exposing /data/manifest.json and /data/search/<id>.json
-FINAL_W, FINAL_NMIN, FINAL_OCC = 0.012, 2, 10     # 最终采用的参数（由扫描结果选定）
+FINAL_W, FINAL_NMIN, FINAL_OCC = 0.012, 2, 10
+V3_MAIN = "α=0.03"     # 最终采用的参数（由扫描结果选定）
 SEP0 = 0xE000                      # 私用区：每部文献一个独有的结尾符
 
 
@@ -297,6 +298,13 @@ def run(outdir, docs=None):
                 x["attr"] = attribution(x)
             pair_spans[(fam, tname)] = sp
 
+    from .lemma_walk import background_counts, lemma_walk
+    t1 = time.time()
+    sa_np = np.asarray(sa, dtype=np.int64)
+    _strs = {x["s"] for sp in pair_spans.values() for x in sp}
+    bgc, nbg = background_counts(C, sa, sa_np, _strs, sa_range)
+    R["corpus"]["bg_chars"] = nbg; R["corpus"]["t_bgcount_s"] = round(time.time() - t1, 1)
+    del sa_np
     def add_chain(spans, target, iters=2, w_frac=0.012, nmin=2):
         N_T = target["end"] - target["start"]
         W = max(200, int(w_frac * N_T))
@@ -383,6 +391,75 @@ def run(outdir, docs=None):
                         "recall": round(recall_of(acc_c), 3)})
         CFG.update({"w_frac": FINAL_W, "nmin": FINAL_NMIN, "occ": FINAL_OCC})
         set_chain(tname, FINAL_W, FINAL_NMIN)
+        # ---- v3：行走模型（共线锚 + 夹逼区间 + 期望偶然数）
+        null_docs = [d for d in C.docs if d["fam"] == "null"]
+        N_T = target["end"] - target["start"]
+        def evaluate(name, acc_ids_c, acc_ids_n, acc_ids_a):
+            acc_c = [x for x in pair_spans[(cf, tname)] if id(x) in acc_ids_c]
+            dc = len(acc_c) / max(1, fam_chars[cf]) * 1e4
+            dn = sum(1 for x in pair_spans[(nf, tname)] if id(x) in acc_ids_n) / max(1, fam_chars[nf]) * 1e4
+            row = {"target": tname, "variant": name, "accepted": len(acc_c), "per10k": round(dc, 2),
+                   "cross_lb": round(max(0.0, 1 - dn / dc), 3) if dc else 0.0}
+            for nd in null_docs:
+                k = sum(1 for x in pair_spans[("null", tname)] if id(x) in acc_ids_a and x["doc"]["id"] == nd["id"])
+                da = k / max(1, nd["end"] - nd["start"]) * 1e4
+                row["null_" + nd["id"]] = round(max(0.0, 1 - da / dc), 3) if dc else 0.0
+            row["recall"] = round(recall_of(acc_c), 3)
+            extra = 0
+            for x in acc_c:
+                st = x["doc"]["start"]; a_ = x["p"] - st
+                if b"\x01" not in gold_mask[x["doc"]["id"]][a_:a_ + x["m"]]:
+                    extra += 1
+            row["unquoted_new"] = extra
+            R.setdefault("v3", []).append(row)
+            return acc_c
+        evaluate("v2（对照）", {id(x) for x in pair_spans[(cf, tname)] if accept_v2(x)},
+                 {id(x) for x in pair_spans[(nf, tname)] if accept_v2(x)},
+                 {id(x) for x in pair_spans[("null", tname)] if accept_v2(x)})
+        V3 = [("α=0.01", dict(alpha=0.01)), ("α=0.03", dict(alpha=0.03)), ("α=0.1", dict(alpha=0.1)), ("α=0.3", dict(alpha=0.3)),
+              ("α=0.03 +牒经句式", dict(alpha=0.03, lemma=True)), ("α=0.1 +牒经句式", dict(alpha=0.1, lemma=True)),
+              ("α=0.03 不生长", dict(alpha=0.03, grow=False)), ("α=0.03 种子不限频度", dict(alpha=0.03, seed_E=1e9)),
+              ("α=0.03 单侧区间300", dict(alpha=0.03, one_side=300))]
+        v3_main = None
+        for name, kw in V3:
+            ac, why_c = lemma_walk(pair_spans[(cf, tname)], N_T, bgc, C.text, nbg, **kw)
+            an, _ = lemma_walk(pair_spans[(nf, tname)], N_T, bgc, C.text, nbg, **kw)
+            aa, _ = lemma_walk(pair_spans[("null", tname)], N_T, bgc, C.text, nbg, **kw)
+            acc_c = evaluate(name, set(ac), set(an), set(aa))
+            if name == V3_MAIN:
+                v3_main = (acc_c, why_c)
+        if v3_main:
+            acc_c, why_c = v3_main
+            mask = {did: bytearray(len(v)) for did, v in gold_mask.items()}
+            for x in acc_c:
+                st = x["doc"]["start"]; a_ = x["p"] - st
+                mask[x["doc"]["id"]][a_:a_ + x["m"]] = b"\x01" * x["m"]
+            byd = collections.defaultdict(list)
+            for x in pair_spans[(cf, tname)]:
+                byd[x["doc"]["id"]].append(x)
+            for v in byd.values():
+                v.sort(key=lambda x: x["p"])
+            rs, rl, smp = collections.Counter(), collections.defaultdict(collections.Counter), collections.defaultdict(list)
+            for did, g, L_ in gold:
+                st = C.doc_of(g)["start"]
+                if b"\x00" not in mask[did][g - st:g - st + L_]:
+                    continue
+                xs = byd.get(did, []); ps = [x["p"] for x in xs]
+                k = bisect.bisect_right(ps, g) - 1
+                cov = next((xs[j] for j in range(max(0, k - 4), min(len(xs), k + 5))
+                            if xs[j]["p"] <= g and xs[j]["p"] + xs[j]["m"] >= g + L_), None)
+                w_ = "no_cover" if cov is None else why_c.get(id(cov), "partial")
+                rs[w_] += 1
+                rl["4" if L_ == 4 else "5-7" if L_ < 8 else "8+"][w_] += 1
+                if len(smp[w_]) < 5:
+                    d_ = C.doc_of(g); pi_ = C.para_of(d_, g)
+                    smp[w_].append(f"{did}（{L_}字，经内{len(cov['occ']) if cov else 0}处）…{ctx(d_['praw'][pi_], C.text[g:g + L_])}…")
+            R.setdefault("v3_miss", {})[tname] = {"reasons": dict(rs), "by_len": {k_: dict(v_) for k_, v_ in rl.items()}, "samples": dict(smp)}
+            # 阿含对照里 v3 仍接受的样例（看噪声是什么）
+            aa_main, _ = lemma_walk(pair_spans[("null", tname)], N_T, bgc, C.text, nbg, **dict(V3)[V3_MAIN])
+            R.setdefault("v3_null_samples", {})[tname] = [
+                f"{x['doc']['id']}（{x['m']}字，经内{len(x['occ'])}处，背景{bgc.get(x['s'])}次）{x['s']}"
+                for x in pair_spans[("null", tname)] if id(x) in aa_main][:12]
         for attr_mode in ("不过滤", "去别部经", "去别部经+顺序链", "v2"):
             keep = {"不过滤": lambda x: True,
                     "去别部经": lambda x: x["attr"] != "other",
@@ -587,6 +664,21 @@ def report(R):
           "| 目标 | 文献 | 作者 | 段落 | 锚定 | 插值 | 覆盖率 |", "|---|---|---|---|---|---|---|"]
     for r in sorted(R["coverage"], key=lambda r: (r["target"], -r["coverage"])):
         L.append(f"| {r['target']} | {r['doc']} {r['title']} | {r['author']} | {r['paras']} | {r['anchored']} | {r['interpolated']} | {r['coverage']} |")
+    if R.get("v3"):
+        nk = [k for k in R["v3"][0] if k.startswith("null_")]
+        L += ["", "## v3 行走模型（共线锚 + 夹逼区间 + 期望偶然数 E = 语言频度 × 区间长）", "",
+              "精确率分别用两部阿含独立估计（两者一致才可信）；交叉下界 = 用另一族疏文作对照。", "",
+              "| 目标 | 变体 | 命中 | 每万字 | " + " | ".join("估计精确率·" + k[5:] for k in nk) + " | 交叉下界 | 召回 | 无引号新增 |",
+              "|---|---|---|---|" + "---|" * len(nk) + "---|---|---|"]
+        for x in R["v3"]:
+            L.append(f"| {x['target']} | {x['variant']} | {x['accepted']} | {x['per10k']} | " + " | ".join(str(x[k]) for k in nk)
+                     + f" | {x['cross_lb']} | {x['recall']} | {x['unquoted_new']} |")
+        for t, mm in R.get("v3_miss", {}).items():
+            L += ["", f"### v3 漏召（{t}）：{mm['reasons']}；按字数 {mm['by_len']}"]
+            for w_, xs in mm["samples"].items():
+                L.append(f"- [{w_}]"); L += [f"  - {e}" for e in xs]
+        for t, xs in R.get("v3_null_samples", {}).items():
+            L += ["", f"### v3 在阿含对照中仍接受的样例（{t}）"] + [f"- {e}" for e in xs]
     L += ["", "## 参数扫描（v2；估计精确率用阿含对照）", "",
           "| 目标 | 窗口占比 | 最少近邻 | 经内出现上限 | 命中 | 每万字 | 阿含每万字 | 估计精确率 | 召回 |", "|---|---|---|---|---|---|---|---|---|"]
     for r in R.get("sweep", []):
