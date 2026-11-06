@@ -1,0 +1,17 @@
+name: selftest
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.short_quote --selftest
+      - run: python3 -m indra.suffix_experiment --selftest

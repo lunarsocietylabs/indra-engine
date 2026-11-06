@@ -1,0 +1,22 @@
+name: experiment
+# Manual only. Reads a corpus server (no secrets, nothing is written back); report goes to the Job Summary.
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Corpus server base URL (serves /data/manifest.json and /data/search/<id>.json)
+        required: true
+        default: https://aicanon.omnisun.workers.dev
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.suffix_experiment --selftest
+      - run: mkdir -p /tmp/indra && INDRA_SITE="${{ inputs.site }}" python3 -m indra.suffix_experiment --out /tmp/indra
+      - run: cat /tmp/indra/report.md >> "$GITHUB_STEP_SUMMARY"
