@@ -29,6 +29,7 @@ import numpy as np
 from .norm import norm
 
 SITE = os.environ.get("INDRA_SITE", "")   # base URL of a corpus server exposing /data/manifest.json and /data/search/<id>.json
+FINAL_W, FINAL_NMIN, FINAL_OCC = 0.012, 2, 10     # 最终采用的参数（由扫描结果选定）
 SEP0 = 0xE000                      # 私用区：每部文献一个独有的结尾符
 
 
@@ -296,9 +297,9 @@ def run(outdir, docs=None):
                 x["attr"] = attribution(x)
             pair_spans[(fam, tname)] = sp
 
-    def add_chain(spans, target, iters=2):
+    def add_chain(spans, target, iters=2, w_frac=0.012, nmin=2):
         N_T = target["end"] - target["start"]
-        W = max(200, int(0.012 * N_T))
+        W = max(200, int(w_frac * N_T))
         by = collections.defaultdict(list)
         for x in spans:
             by[x["doc"]["id"]].append(x)
@@ -313,7 +314,7 @@ def run(outdir, docs=None):
                     k = bisect.bisect_left(sp, x["p"])
                     nb = [xs[sc[j]]["occ"][0] for j in range(max(0, k - 5), min(len(sc), k + 6))
                           if sc[j] != i and abs(xs[sc[j]]["p"] - x["p"]) <= 2500]
-                    if len(nb) < 2:
+                    if len(nb) < nmin:
                         x["chain"], x["pos"] = None, x["occ"][0]
                         continue
                     med = sorted(nb)[len(nb) // 2]
@@ -325,7 +326,11 @@ def run(outdir, docs=None):
     for (fam, tname), sp in pair_spans.items():
         add_chain(sp, T[tname])
     RULES["v2"] = lambda m, occ, bg: m >= 8 or (m >= 4 and occ <= 10)
-    accept_v2 = lambda x: x["attr"] != "other" and (x["m"] >= 8 or (x.get("chain") is True and len(x["occ"]) <= 10))
+    CFG = {"w_frac": 0.012, "nmin": 2, "occ": 10}
+    accept_v2 = lambda x: x["attr"] != "other" and (x["m"] >= 8 or (x.get("chain") is True and len(x["occ"]) <= CFG["occ"]))
+    def set_chain(tname, w_frac, nmin):
+        for fam in ("heart_com", "lotus_com", "null"):
+            add_chain(pair_spans[(fam, tname)], T[tname], w_frac=w_frac, nmin=nmin)
 
     correct = {"heart_sutra": "heart_com", "lotus_sutra": "lotus_com"}
     null = {"heart_sutra": "lotus_com", "lotus_sutra": "heart_com"}
@@ -352,6 +357,32 @@ def run(outdir, docs=None):
         for did, g, L in gold:
             st = C.doc_of(g)["start"]
             gold_mask[did][g - st:g - st + L] = b"\x01" * L
+        def recall_of(acc_c):
+            cover = {did: bytearray(len(v)) for did, v in gold_mask.items()}
+            for x in acc_c:
+                st = x["doc"]["start"]; a_ = x["p"] - st
+                cover[x["doc"]["id"]][a_:a_ + x["m"]] = b"\x01" * x["m"]
+            hit = 0
+            for did, g, L_ in gold:
+                st = C.doc_of(g)["start"]
+                if b"\x00" not in cover[did][g - st:g - st + L_]:
+                    hit += 1
+            return hit / max(1, len(gold))
+        for wf in (0.004, 0.008, 0.012, 0.02):
+            for nm in (2, 3):
+                set_chain(tname, wf, nm)
+                for om in (3, 6, 10):
+                    CFG["occ"] = om
+                    acc_c = [x for x in pair_spans[(cf, tname)] if accept_v2(x)]
+                    acc_a = [x for x in pair_spans[("null", tname)] if accept_v2(x)]
+                    dc = len(acc_c) / max(1, fam_chars[cf]) * 1e4
+                    da = len(acc_a) / max(1, fam_chars["null"]) * 1e4
+                    R.setdefault("sweep", []).append({"target": tname, "w_frac": wf, "nmin": nm, "occ_max": om,
+                        "accepted": len(acc_c), "per10k": round(dc, 2), "agama_per10k": round(da, 2),
+                        "est_precision": round(max(0.0, 1 - da / dc), 3) if dc else 0.0,
+                        "recall": round(recall_of(acc_c), 3)})
+        CFG.update({"w_frac": FINAL_W, "nmin": FINAL_NMIN, "occ": FINAL_OCC})
+        set_chain(tname, FINAL_W, FINAL_NMIN)
         for attr_mode in ("不过滤", "去别部经", "去别部经+顺序链", "v2"):
             keep = {"不过滤": lambda x: True,
                     "去别部经": lambda x: x["attr"] != "other",
@@ -556,6 +587,10 @@ def report(R):
           "| 目标 | 文献 | 作者 | 段落 | 锚定 | 插值 | 覆盖率 |", "|---|---|---|---|---|---|---|"]
     for r in sorted(R["coverage"], key=lambda r: (r["target"], -r["coverage"])):
         L.append(f"| {r['target']} | {r['doc']} {r['title']} | {r['author']} | {r['paras']} | {r['anchored']} | {r['interpolated']} | {r['coverage']} |")
+    L += ["", "## 参数扫描（v2；估计精确率用阿含对照）", "",
+          "| 目标 | 窗口占比 | 最少近邻 | 经内出现上限 | 命中 | 每万字 | 阿含每万字 | 估计精确率 | 召回 |", "|---|---|---|---|---|---|---|---|---|"]
+    for r in R.get("sweep", []):
+        L.append(f"| {r['target']} | {r['w_frac']} | {r['nmin']} | {r['occ_max']} | {r['accepted']} | {r['per10k']} | {r['agama_per10k']} | {r['est_precision']} | {r['recall']} |")
     L += ["", "## 召回缺口分析（明引片段为何没找回；规则 v2）", ""]
     for t, m in R.get("miss", {}).items():
         L.append(f"### {t}：漏 {m['total_missed']} 条；原因 {m['reasons']}")
