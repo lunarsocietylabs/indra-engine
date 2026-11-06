@@ -24,8 +24,10 @@ TARGETS = [
     ("amitabha", "T12n0366", "阿彌陀經", lambda t: "阿彌陀經" in t and "無量壽" not in t),
     ("vimalakirti", "T14n0475", "維摩經", lambda t: "維摩" in t),
     ("diamond", "T08n0235", "金剛經", lambda t: ("金剛般若" in t or "金剛經" in t) and "金剛頂" not in t and "三昧" not in t),
+    ("heart", "T08n0251", "心經", lambda t: "般若" in t and "心經" in t and "金剛" not in t),
+    ("lotus", "T09n0262", "法華經", lambda t: "法華" in t or "妙法蓮華" in t),
 ]
-OTHER_SUTRAS = ["T08n0223", "T10n0279", "T12n0374", "T25n1509", "T08n0251", "T09n0262", "T12n0360"]
+OTHER_SUTRAS = ["T08n0223", "T10n0279", "T12n0374", "T25n1509", "T12n0360"]
 BG = ["T01n0001", "T02n0099"]
 NULL = ["T01n0026", "T02n0125"]
 CAP_CHARS = 1_500_000          # 每族注疏取前 150 万字（按经号排序，确定性）
@@ -135,7 +137,7 @@ def one_sub_diagnostic(C, cf, tstr, minlen=6, maxlen=24):
     return {"quotes_6_24": tot, "exact": exact, "one_sub": one, "top_pairs": top}
 
 
-def run(outdir, docs=None):
+def run(outdir, docs=None, full=None):
     os.makedirs(outdir, exist_ok=True)
     t0 = time.time()
     docs = docs or fetch()
@@ -211,12 +213,24 @@ def run(outdir, docs=None):
                         j = pn.find(frag)
                         if j >= 0:
                             gold.append((d, d["pstarts"][i] + j, len(frag)))
+        com_ids = [d["id"] for d in C.docs if d["fam"] == cf]
+        null_ids = [d["id"] for d in null_docs]
+        bgvars = [("样本背景(基线)", bgc, nbg)]
+        if full is not None:
+            strs = {x["s"] for f in fams for x in spans[f]}
+            for vname, msk in (("全藏·排除目标经/其注疏/阿含对照", full.mask([tid] + com_ids + null_ids)),
+                               ("全藏·仅经藏正文", full.mask([tid] + null_ids, classes=("canon",)))):
+                bgv = {s_: full.count(s_, msk) for s_ in strs}
+                bgvars.append((vname, bgv, full.chars(msk)))
         tiers = []
-        for tier, kw in FROZEN.items():
-            acc = {f: lemma_walk(spans[f], N_T, bgc, C.text, nbg, **kw)[0] for f in fams}
-            tiers.append((tier, acc))
-            if tier == "确定层":
-                tiers.append(("确定层+复注传递", {f: propagate(C, f, spans[f], acc[f], fam_ms[f]) for f in fams}))
+        for bgname, bgc_, nbg_ in bgvars:
+            for tier, kw in FROZEN.items():
+                if bgname != bgvars[0][0] and tier != "确定层":
+                    continue
+                acc = {f: lemma_walk(spans[f], N_T, bgc_, C.text, nbg_, **kw)[0] for f in fams}
+                tiers.append((tier + ("" if bgname == bgvars[0][0] else " · " + bgname), acc))
+                if tier == "确定层" and bgname == bgvars[0][0]:
+                    tiers.append(("确定层+复注传递", {f: propagate(C, f, spans[f], acc[f], fam_ms[f]) for f in fams}))
         for tier, acc in tiers:
             acc_c = [x for x in spans[cf] if id(x) in acc[cf]]
             dc = len(acc_c) / max(1, fam_chars[cf]) * 1e4
@@ -262,9 +276,11 @@ def report(R):
     rows = [r for r in R["rows"] if "error" not in r]
     nk = sorted({k for r in rows for k in r if k.startswith("prec_")})
     from .norm import VARIANTS
-    L = ["# 留出检验：v3 参数冻结，换三部未参与调参的经", "",
+    fc = R.get("fullcanon")
+    L = ["# 留出检验：v3 参数冻结，换未参与调参的经", "",
          f"- 异体字归一：{'开（Unihan kZVariant+kSemanticVariant，' + str(len(VARIANTS)) + ' 字映射）' if VARIANTS else '关'}",
          f"- 语料 {R['corpus']['chars']:,} 字；各族（文献数，字数）{R['corpus']['fams']}；总耗时 {R['elapsed_s']}s", "",
+         *( [f"- 全藏索引：{fc}", ""] if fc else [] ),
          "| 经 | 层 | 注疏数 | 注疏字数 | 命中 | 每万字 | " + " | ".join("估计精确率·" + k[5:] for k in nk) + " | 交叉下界 | 考卷 | 召回 |",
          "|---|---|---|---|---|---|" + "---|" * len(nk) + "---|---|---|"]
     for r in rows:
@@ -284,4 +300,15 @@ def report(R):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/tmp/heldout")
-    run(ap.parse_args().out)
+    ap.add_argument("--full", action="store_true", help="also build the whole-canon index and use it as background")
+    a = ap.parse_args()
+    full = None
+    if a.full:
+        from .fullcanon import FullCanon
+        full = FullCanon()
+        st = full.stats()
+        print("FULLCANON", json.dumps(st, ensure_ascii=False), flush=True)
+    R = run(a.out, full=full)
+    if full is not None:
+        R["fullcanon"] = st
+        json.dump(R, open(os.path.join(a.out, "heldout.json"), "w"), ensure_ascii=False, indent=1)

@@ -1,0 +1,28 @@
+name: fullcanon
+# Manual only. Builds a whole-canon suffix array (libsais, ~270M chars) and re-runs the frozen v3 test with the whole canon as
+# background. Public repo => standard runner (4 vCPU / 16 GB), free. Read-only against the corpus server.
+on:
+  workflow_dispatch:
+    inputs:
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+      variants: {description: Unify variant characters via Unihan, type: boolean, default: true}
+concurrency: {group: "${{ github.workflow }}", cancel-in-progress: true}
+jobs:
+  fullcanon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.suffix_experiment --selftest
+      - run: python3 -m indra.native_sa --build && python3 -m indra.native_sa
+      - if: ${{ inputs.variants }}
+        run: |
+          curl -fsSL -o /tmp/Unihan.zip https://www.unicode.org/Public/16.0.0/ucd/Unihan.zip
+          unzip -o -q /tmp/Unihan.zip Unihan_Variants.txt -d /tmp/unihan
+          echo "INDRA_VARIANTS=/tmp/unihan/Unihan_Variants.txt" >> "$GITHUB_ENV"
+      - run: mkdir -p /tmp/fc && INDRA_SITE="${{ inputs.site }}" python3 -m indra.heldout --full --out /tmp/fc
+      - if: always()
+        run: free -g; cat /tmp/fc/report.md >> "$GITHUB_STEP_SUMMARY" || true
