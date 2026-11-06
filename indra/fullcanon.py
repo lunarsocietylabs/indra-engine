@@ -34,9 +34,17 @@ class FullCanon:
         parts, ids, ok = {}, {}, []
 
         def one(d):
-            r = requests.get(f"{SITE}/data/search/{d['doc_id']}.json", timeout=300)
-            if r.status_code != 200 or r.headers.get("content-type", "").startswith("text/html"):
-                return d["doc_id"], None
+            for attempt in range(5):                       # 网络偶发断流：重试，确定性不受影响（内容相同）
+                try:
+                    r = requests.get(f"{SITE}/data/search/{d['doc_id']}.json", timeout=300)
+                    if r.status_code != 200 or r.headers.get("content-type", "").startswith("text/html"):
+                        return d["doc_id"], None
+                    r.json()
+                    break
+                except (requests.RequestException, ValueError):
+                    if attempt == 4:
+                        raise
+                    time.sleep(2 * (attempt + 1))
             s = "".join(norm(p.get("t") or "") for p in r.json().get("paragraphs", []))
             return d["doc_id"], np.frombuffer(s.encode("utf-32-le"), dtype=np.uint32)
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
