@@ -10,6 +10,9 @@
 import collections, re
 
 MAX_COMP = 4
+# 佛典里常见、确属同字异写的补充对（Unihan 未收或归在繁简字段里）：写法不同、字义相同，只用于匹配。
+# 刻意不放 即/則、土/國 这类"用字确实不同"的对。
+EXTRA = {"帀": "匝", "嘆": "歎", "毘": "毗", "瑠": "琉", "脩": "修", "虗": "虛", "恆": "恒", "揵": "犍", "鞞": "毘"}
 _CP = re.compile(r"U\+([0-9A-F]{4,6})")
 
 
@@ -48,4 +51,7 @@ def load_unihan(path):
             for c in cs:
                 if c != canon:
                     table[ord(c)] = canon
+    for a, b in EXTRA.items():
+        table[ord(a)] = table.get(ord(b), b)
+        table.pop(ord(b), None) if False else None
     return table
