@@ -224,8 +224,11 @@ def run(outdir, docs=None, full=None):
                 bgvars.append((vname, bgv, full.chars(msk)))
         tiers = []
         for bgname, bgc_, nbg_ in bgvars:
-            for tier, kw in FROZEN.items():
-                if bgname != bgvars[0][0] and tier != "确定层":
+            items = list(FROZEN.items())
+            if bgname == "全藏·仅经藏正文":
+                items = [("确定层", FROZEN["确定层"])] + [(f"确定层 α={a}", dict(FROZEN["确定层"], alpha=a)) for a in (0.002, 0.004, 0.006)]
+            for tier, kw in items:
+                if bgname != bgvars[0][0] and not tier.startswith("确定层"):
                     continue
                 acc = {f: lemma_walk(spans[f], N_T, bgc_, C.text, nbg_, **kw)[0] for f in fams}
                 tiers.append((tier + ("" if bgname == bgvars[0][0] else " · " + bgname), acc))
