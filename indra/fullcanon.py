@@ -29,7 +29,7 @@ class FullCanon:
         man = requests.get(f"{SITE}/data/manifest.json", timeout=180).json()
         allm = man.get("docs", man) if isinstance(man, dict) else man
         self.meta = [d for d in allm if d.get("doc_id")]
-        tab = np.full(0x40000, -1, dtype=np.int32)
+        tab = np.full(0x110000, -1, dtype=np.int32)
         nxt = [0]
         parts, ids, ok = {}, {}, []
 
