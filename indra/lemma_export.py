@@ -89,7 +89,7 @@ def export(C, target, spans_acc, outdir, tid, title, ctx=40, max_items=40):
                 "lb": d["plbs"][pi_c], "m": x["m"], "s": s}
         while k < len(flat) and flat[k][0] < b:
             f = flat[k]
-            if min(b, f[1]) - max(a, f[0]) >= min(4, x["m"]):
+            if min(b, f[1]) - max(a, f[0]) >= min(4, x["m"], f[1] - f[0]):   # 短句（受、想、舍利子）只要被完整覆盖即算
                 cl = paras[f[2]]["clauses"][f[3]]
                 cur = cl["docs"].get(d["id"])
                 if cur is None or item["m"] > cur["m"]:
