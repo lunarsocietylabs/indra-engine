@@ -1,0 +1,22 @@
+name: dfb
+# Manual only. Measures what Ding Fubao's dictionary (DDBC TEI, CC BY-SA 2.5 TW; text public domain) contributes
+# against the whole canon. The dictionary is fetched at run time from a public repository and not committed here.
+on:
+  workflow_dispatch:
+    inputs:
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+concurrency: {group: "${{ github.workflow }}", cancel-in-progress: true}
+jobs:
+  dfb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.native_sa --build && python3 -m indra.native_sa
+      - run: curl -fsSL -o /tmp/dingfubao.xml https://raw.githubusercontent.com/MrMYHuang/dfb-dict/main/assets/dingfubao.xml && head -c 300 /tmp/dingfubao.xml | tail -c 120
+      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.dfb /tmp/dingfubao.xml /tmp/dfb
+      - if: always()
+        run: cat /tmp/dfb/dfb.json >> "$GITHUB_STEP_SUMMARY" || true
