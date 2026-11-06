@@ -43,6 +43,11 @@ v3 = `lemma_walk(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=5)`. These are 
 
 Most residual Agama-null hits are narrative formulae (受教而聽佛言, 歎曰善哉善哉) that Agama and Mahayana sutras share; commentaries rarely produce them, which is why the cross-commentary control reads higher.
 
+### Things tried that did not help (kept for the record)
+
+- **Sub-commentary propagation** (`lemma_walk.propagate`): inherit confirmed links through verbatim runs of ≥16 characters shared between two commentaries. Recall +0.0 to +0.3 points; later commentaries cite earlier ones in short lemmas, not long verbatim runs.
+- **Variant characters** (`INDRA_VARIANTS=Unihan_Variants.txt`): Unicode Unihan kZVariant + kSemanticVariant only (1,943 characters; simplified/traditional pairs deliberately excluded). Quoted passages verifiable in the sutra +0.8% to +6%, precision unchanged. The remaining one-character differences are real wording changes (即/則, 土/國), which should not be merged.
+
 ## Run it
 
 ```
