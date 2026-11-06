@@ -30,6 +30,19 @@ Precision is estimated three independent ways (two Agama collections that cannot
 
 v3 = `lemma_walk(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=5)`. These are estimates from a sample, not a full-canon evaluation. Known weaknesses: string frequencies come from a ~3.5M-character background, so strings that straddle word boundaries look rarer than they are; variant characters are not yet unified; commentaries on commentaries are not yet linked. See `indra/lemma_walk.py` and `indra/suffix_experiment.py`.
 
+
+### Held-out test (parameters frozen, sutras never used for tuning)
+
+`python3 -m indra.heldout` — same v3 parameters, 7.3M-character corpus, 77 s on a free runner.
+
+| Sutra | Commentaries (chars) | Hits | Est. precision (中阿含 / 增一 / cross) | Recall |
+|---|---|---|---|---|
+| 阿彌陀經 T12n0366 | 27 (0.73M) | 6,399 | 0.978 / 0.972 / 0.987 | 0.970 |
+| 維摩經 T14n0475 | 11 (1.49M) | 20,792 | 0.941 / 0.943 / 0.952 | 0.969 |
+| 金剛經 T08n0235 | 36 (1.50M) | 18,550 | 0.937 / 0.918 / 0.979 | 0.965 |
+
+Most residual Agama-null hits are narrative formulae (受教而聽佛言, 歎曰善哉善哉) that Agama and Mahayana sutras share; commentaries rarely produce them, which is why the cross-commentary control reads higher.
+
 ## Run it
 
 ```
