@@ -1,0 +1,22 @@
+name: heldout
+# Manual only. Held-out test with frozen v3 parameters on sutras never used for tuning. Report goes to the Job Summary.
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: Corpus server base URL
+        required: true
+        default: https://aicanon.omnisun.workers.dev
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}
+jobs:
+  heldout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.suffix_experiment --selftest
+      - run: mkdir -p /tmp/ho && INDRA_SITE="${{ inputs.site }}" python3 -m indra.heldout --out /tmp/ho
+      - run: cat /tmp/ho/report.md >> "$GITHUB_STEP_SUMMARY"
