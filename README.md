@@ -43,6 +43,24 @@ v3 = `lemma_walk(alpha=0.01, lemma=True, lemma_ext=True, lemma_k=5)`. These are 
 
 Most residual Agama-null hits are narrative formulae (受教而聽佛言, 歎曰善哉善哉) that Agama and Mahayana sutras share; commentaries rarely produce them, which is why the cross-commentary control reads higher.
 
+### Whole-canon index (free runner, 5 minutes end to end)
+
+`python3 -m indra.heldout --full` builds a suffix array over **every document the corpus server holds: 4,947 documents, 228,074,731 characters** (after stripping punctuation), with libsais through ctypes (`indra/native_sa.py`, `native/sa_tools.c`; verified against brute force). Fetch 103 s, SA + LCP 16.5 s, about 5 GB RAM. Random 4–8 character lookups: **p50 0.006 ms, p99 0.008 ms**, 172 occurrences on average.
+
+Redundancy of the canon: 35% of all positions sit inside a passage of ≥8 characters that occurs elsewhere, 27% ≥16, 21% ≥32, 17% ≥64.
+
+Using the whole canon as the language background for the chance score (excluding the target sutra, its commentaries and the Agama controls), with α recalibrated on the two tuning sutras only (Heart, Lotus):
+
+| Sutra | v3, 5M-char background (α=0.01) | v3, whole-canon sutra background (α=0.006) |
+|---|---|---|
+| 阿彌陀經 (held-out) | 0.978 / 0.972 · recall 0.970 | **0.996 / 0.970** · recall 0.970 |
+| 維摩經 (held-out) | 0.940 / 0.942 · 0.970 | **0.971 / 0.957** · 0.964 |
+| 金剛經 (held-out) | 0.936 / 0.917 · 0.964 | **0.977 / 0.942** · 0.961 |
+| 心經 (tuning) | 0.996 / 0.992 · 0.952 | 0.997 / 0.991 · 0.907 |
+| 法華經 (tuning) | 0.959 / 0.939 · 0.871 | 0.921 / 0.898 · 0.887 |
+
+(precision vs. 中阿含 / 增一, then recall.) A better background moves the held-out sutras up on precision at a small recall cost; on the two tuning sutras (short, 4-character-heavy) it mostly trades one for the other. We do not claim more than that.
+
 ### Things tried that did not help (kept for the record)
 
 - **Sub-commentary propagation** (`lemma_walk.propagate`): inherit confirmed links through verbatim runs of ≥16 characters shared between two commentaries. Recall +0.0 to +0.3 points; later commentaries cite earlier ones in short lemmas, not long verbatim runs.
