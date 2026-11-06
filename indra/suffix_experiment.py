@@ -281,7 +281,7 @@ def run(outdir, docs=None):
         for q in range(p, max(pst, p - 40) - 1, -1):
             L = min(msc[q], pen - q)
             if q + L >= p + m:
-                if L > m:
+                if L > m and L >= 8:      # v2: 短片段在别处有略长的巧合匹配，不算引自别部经
                     return "other"
                 best = "shared"
         return best
@@ -296,27 +296,36 @@ def run(outdir, docs=None):
                 x["attr"] = attribution(x)
             pair_spans[(fam, tname)] = sp
 
-    def add_chain(spans, target):
-        W = max(200, int(0.03 * (target["end"] - target["start"])))
+    def add_chain(spans, target, iters=2):
+        N_T = target["end"] - target["start"]
+        W = max(200, int(0.012 * N_T))
         by = collections.defaultdict(list)
         for x in spans:
             by[x["doc"]["id"]].append(x)
         for xs in by.values():
             xs.sort(key=lambda x: x["p"])
-            strong = [i for i, x in enumerate(xs) if x["m"] >= 8 and len(x["occ"]) == 1 and x.get("attr") != "other"]
-            sp = [xs[i]["p"] for i in strong]
-            for i, x in enumerate(xs):
-                k = bisect.bisect_left(sp, x["p"])
-                nb = [xs[strong[j]]["occ"][0] for j in range(max(0, k - 4), min(len(strong), k + 5)) if strong[j] != i]
-                if len(nb) < 2:
-                    x["chain"], x["pos"] = None, x["occ"][0]; continue
-                med = sorted(nb)[len(nb) // 2]
-                pos = min(x["occ"], key=lambda o: abs(o - med))
-                x["pos"] = pos
-                x["chain"] = abs(pos - med) <= W
+            grown = set()
+            for _ in range(iters):
+                sc = [i for i, x in enumerate(xs) if x.get("attr") != "other" and len(x["occ"]) == 1
+                      and (x["m"] >= 8 or (x["m"] >= 6 and x["bg"] == 0) or i in grown)]
+                sp = [xs[i]["p"] for i in sc]
+                for i, x in enumerate(xs):
+                    k = bisect.bisect_left(sp, x["p"])
+                    nb = [xs[sc[j]]["occ"][0] for j in range(max(0, k - 5), min(len(sc), k + 6))
+                          if sc[j] != i and abs(xs[sc[j]]["p"] - x["p"]) <= 2500]
+                    if len(nb) < 2:
+                        x["chain"], x["pos"] = None, x["occ"][0]
+                        continue
+                    med = sorted(nb)[len(nb) // 2]
+                    pos = min(x["occ"], key=lambda o: abs(o - med))
+                    x["pos"] = pos
+                    x["chain"] = abs(pos - med) <= W
+                    if x["chain"] and x["m"] >= 5 and len(x["occ"]) == 1 and x.get("attr") != "other":
+                        grown.add(i)
     for (fam, tname), sp in pair_spans.items():
         add_chain(sp, T[tname])
-    RULES["L≥4+专属+链"] = lambda m, occ, bg: m >= 8 or (m >= 4 and bg == 0 and occ <= 3)
+    RULES["v2"] = lambda m, occ, bg: m >= 8 or (m >= 4 and occ <= 10)
+    accept_v2 = lambda x: x["attr"] != "other" and (x["m"] >= 8 or (x.get("chain") is True and len(x["occ"]) <= 10))
 
     correct = {"heart_sutra": "heart_com", "lotus_sutra": "lotus_com"}
     null = {"heart_sutra": "lotus_com", "lotus_sutra": "heart_com"}
@@ -343,11 +352,14 @@ def run(outdir, docs=None):
         for did, g, L in gold:
             st = C.doc_of(g)["start"]
             gold_mask[did][g - st:g - st + L] = b"\x01" * L
-        for attr_mode in ("不过滤", "去别部经", "去别部经+顺序链"):
+        for attr_mode in ("不过滤", "去别部经", "去别部经+顺序链", "v2"):
             keep = {"不过滤": lambda x: True,
                     "去别部经": lambda x: x["attr"] != "other",
-                    "去别部经+顺序链": lambda x: x["attr"] != "other" and x.get("chain") is True}[attr_mode]
+                    "去别部经+顺序链": lambda x: x["attr"] != "other" and x.get("chain") is True,
+                    "v2": accept_v2}[attr_mode]
             for rname, rule in RULES.items():
+                if (attr_mode == "v2") != (rname == "v2"):
+                    continue
                 ok = lambda x: rule(x["m"], len(x["occ"]), x["bg"]) and keep(x)
                 acc_c = [x for x in pair_spans[(cf, tname)] if ok(x)]
                 acc_n = [x for x in pair_spans[(nf, tname)] if ok(x)]
@@ -373,14 +385,14 @@ def run(outdir, docs=None):
                               "per10k": round(dens_c, 2), "agama_per10k": round(dens_a, 2), "est_precision": round(pa, 3),
                               "cross_per10k": round(dens_n, 2), "cross_precision_lb": round(pn, 3),
                               "gold": len(gold), "gold_recall": round(hit / max(1, len(gold)), 3), "unquoted_new": extra})
-        attr_cnt = collections.Counter(x["attr"] for x in pair_spans[(cf, tname)] if RULES["L≥4+专属"](x["m"], len(x["occ"]), x["bg"]))
+        attr_cnt = collections.Counter(x["attr"] for x in pair_spans[(cf, tname)] if RULES["v2"](x["m"], len(x["occ"]), x["bg"]))
         R.setdefault("attribution", {})[tname] = dict(attr_cnt)
         R.setdefault("other_samples", {})[tname] = [
             {"doc": x["doc"]["id"], "len": x["m"], "text": x["s"], "ctx": ctx(x["doc"]["praw"][C.para_of(x["doc"], x["p"])], x["s"])}
-            for x in pair_spans[(cf, tname)] if x["attr"] == "other" and RULES["L≥4+专属"](x["m"], len(x["occ"]), x["bg"])][:8]
-        # ---- miss analysis: 为什么这些明引片段没被找回（规则 L≥4+专属，去别部经+顺序链）
+            for x in pair_spans[(cf, tname)] if x["attr"] == "other" and RULES["v2"](x["m"], len(x["occ"]), x["bg"])][:8]
+        # ---- miss analysis: 为什么这些明引片段没被找回（规则 v2）
         spans_all = pair_spans[(cf, tname)]
-        acc = [x for x in spans_all if RULES["L≥4+专属"](x["m"], len(x["occ"]), x["bg"]) and x["attr"] != "other" and x.get("chain") is True]
+        acc = [x for x in spans_all if accept_v2(x)]
         mask = {did: bytearray(len(v)) for did, v in gold_mask.items()}
         for x in acc:
             st = x["doc"]["start"]; a_ = x["p"] - st
@@ -406,10 +418,8 @@ def run(outdir, docs=None):
                 why = "no_cover"
             elif cov["attr"] == "other":
                 why = "other_sutra"
-            elif cov["m"] < 8 and cov["bg"] > 0:
-                why = "agama_common"
-            elif cov["m"] < 8 and len(cov["occ"]) > 3:
-                why = "occ>3"
+            elif cov["m"] < 8 and len(cov["occ"]) > 10:
+                why = "occ>10"
             elif cov.get("chain") is None:
                 why = "chain_no_anchor"
             elif cov.get("chain") is False:
@@ -430,10 +440,9 @@ def run(outdir, docs=None):
     R["rules"] = table
 
     # 锚定 + 消歧 + 插值（规则 L≥4+专属，正确配对）
-    rule = RULES["L≥4+专属"]
     cov_rows, samples, multi_stats = [], {}, collections.Counter()
     for tname, target in T.items():
-        sp = [x for x in pair_spans[(correct[tname], tname)] if rule(x["m"], len(x["occ"]), x["bg"]) and x["attr"] != "other" and x.get("chain") is True]
+        sp = [x for x in pair_spans[(correct[tname], tname)] if accept_v2(x)]
         by_doc = collections.defaultdict(list)
         for x in sp:
             by_doc[x["doc"]["id"]].append(x)
@@ -537,17 +546,17 @@ def report(R):
          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in R["rules"]:
         L.append(f"| {r['target']} | {r['attr']} | {r['rule']} | {r['accepted']} | {r['per10k']} | {r['agama_per10k']} | {r['est_precision']} | {r['cross_per10k']} | {r['cross_precision_lb']} | {r['gold']} | {r['gold_recall']} | {r['unquoted_new']} |")
-    L += ["", f"归属（规则 L≥4+专属）：{R.get('attribution')}", ""]
+    L += ["", f"归属（规则 v2）：{R.get('attribution')}", ""]
     for t, xs in R.get("other_samples", {}).items():
         L.append(f"### 判为引自别部经的样例（{t}）")
         L += [f"- {x['doc']}（{x['len']}字）…{x['ctx']}…" for x in xs]
         L.append("")
     L += [f"消歧（经内多处出现的片段）：{R['disambiguation']}", "",
-          "## 段落覆盖（规则 L≥4+专属，去别部经+顺序链；锚定 + 单调插值）", "",
+          "## 段落覆盖（规则 v2；锚定 + 单调插值）", "",
           "| 目标 | 文献 | 作者 | 段落 | 锚定 | 插值 | 覆盖率 |", "|---|---|---|---|---|---|---|"]
     for r in sorted(R["coverage"], key=lambda r: (r["target"], -r["coverage"])):
         L.append(f"| {r['target']} | {r['doc']} {r['title']} | {r['author']} | {r['paras']} | {r['anchored']} | {r['interpolated']} | {r['coverage']} |")
-    L += ["", "## 召回缺口分析（明引片段为何没找回；规则 L≥4+专属，去别部经+顺序链）", ""]
+    L += ["", "## 召回缺口分析（明引片段为何没找回；规则 v2）", ""]
     for t, m in R.get("miss", {}).items():
         L.append(f"### {t}：漏 {m['total_missed']} 条；原因 {m['reasons']}")
         L.append(f"按引文字数分布：{m['by_len']}")
