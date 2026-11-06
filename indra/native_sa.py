@@ -34,6 +34,7 @@ def lib():
     P = ctypes.c_void_p
     L.kasai32.argtypes = [P, P, P, P, ctypes.c_int32]
     L.sa_range32.argtypes = [P, P, ctypes.c_int32, P, ctypes.c_int32, P, P]
+    L.genome_stats.argtypes = [P, P, P, P, ctypes.c_int32, ctypes.c_int32, P]
     try:
         L.libsais_int_omp.argtypes = [P, P, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
         L.libsais_int_omp.restype = ctypes.c_int32
@@ -65,6 +66,14 @@ class NativeIndex:
             L.kasai32(self.T.ctypes.data, self.SA.ctypes.data, rank.ctypes.data, self.lcp.ctypes.data, n)
             del rank
 
+    def genome_stats(self, doc_of_pos, L=8):
+        o = np.zeros(64, dtype=np.int64)
+        D = np.ascontiguousarray(doc_of_pos, dtype=np.int32)
+        self.L.genome_stats(self.T.ctypes.data, self.SA.ctypes.data, self.lcp.ctypes.data, D.ctypes.data, self.n, int(L), o.ctypes.data)
+        keys = ["genes", "loci", "occ2", "occ3_10", "occ11_100", "occ101_1000", "occ_gt1000", "len_lt16", "len16_31", "len32_63",
+                "len64p", "loci_cap200", "max_depth", "loci_occ2", "loci_occ3_10", "loci_occ11_100", "loci_occ101_1000", "loci_occ_gt1000"]
+        return {k: int(o[i]) for i, k in enumerate(keys)}
+
     def range(self, q):
         q = np.ascontiguousarray(q, dtype=np.int32)
         lo, hi = ctypes.c_int32(), ctypes.c_int32()
@@ -92,7 +101,34 @@ def selftest():
             lo, hi = ix.range(q)
             cnt = sum(1 for i in range(n - m + 1) if T[i:i + m].tolist() == q)
             assert hi - lo == cnt, "range mismatch"
-    print("native_sa selftest: OK (SA, LCP, range vs brute force)")
+    # genome_stats vs brute force: maximal repeats (left-diverse LCP intervals) occurring in >= 2 docs
+    for trial in range(30):
+        k = rnd.choice([2, 3, 4]); docs = [[rnd.randrange(k) for _ in range(rnd.randint(5, 40))] for _ in range(rnd.randint(2, 5))]
+        T, D = [], []
+        for i, d in enumerate(docs):
+            T += d + [k + i]; D += [i] * (len(d) + 1)
+        T = np.array(T, dtype=np.int32); n = len(T)
+        ix = NativeIndex(T, k + len(docs))
+        L = rnd.choice([1, 2, 3])
+        got = ix.genome_stats(np.array(D, dtype=np.int32), L)
+        occ = {}
+        for i in range(n):
+            for j in range(i + L, n + 1):
+                sub = tuple(T[i:j].tolist())
+                if any(c >= k for c in sub):
+                    break
+                occ.setdefault(sub, []).append(i)
+        g = loci = 0
+        for sub, ps in occ.items():
+            if len(ps) < 2 or len({D[p] for p in ps}) < 2:
+                continue
+            m = len(sub)
+            right = {T[p + m] if p + m < n else -9 for p in ps}
+            left = {T[p - 1] if p > 0 else -3 - p for p in ps}
+            if len(right) > 1 and len(left) > 1:
+                g += 1; loci += len(ps)
+        assert (got["genes"], got["loci"]) == (g, loci), (trial, got["genes"], got["loci"], g, loci)
+    print("native_sa selftest: OK (SA, LCP, range, genome stats vs brute force)")
 
 
 if __name__ == "__main__":

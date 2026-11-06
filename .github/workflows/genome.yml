@@ -1,0 +1,20 @@
+name: genome
+# Manual only. Whole-canon "genome" measurement (maximal repeats + lexicon headwords). Free runner, read-only.
+on:
+  workflow_dispatch:
+    inputs:
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+concurrency: {group: "${{ github.workflow }}", cancel-in-progress: true}
+jobs:
+  genome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - run: python3 -m indra.native_sa --build && python3 -m indra.native_sa
+      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.genome /tmp/g
+      - if: always()
+        run: free -g; cat /tmp/g/genome.json >> "$GITHUB_STEP_SUMMARY" || true
