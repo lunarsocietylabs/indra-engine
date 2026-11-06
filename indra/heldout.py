@@ -261,7 +261,9 @@ def run(outdir, docs=None):
 def report(R):
     rows = [r for r in R["rows"] if "error" not in r]
     nk = sorted({k for r in rows for k in r if k.startswith("prec_")})
+    from .norm import VARIANTS
     L = ["# 留出检验：v3 参数冻结，换三部未参与调参的经", "",
+         f"- 异体字归一：{'开（Unihan kZVariant+kSemanticVariant，' + str(len(VARIANTS)) + ' 字映射）' if VARIANTS else '关'}",
          f"- 语料 {R['corpus']['chars']:,} 字；各族（文献数，字数）{R['corpus']['fams']}；总耗时 {R['elapsed_s']}s", "",
          "| 经 | 层 | 注疏数 | 注疏字数 | 命中 | 每万字 | " + " | ".join("估计精确率·" + k[5:] for k in nk) + " | 交叉下界 | 考卷 | 召回 |",
          "|---|---|---|---|---|---|" + "---|" * len(nk) + "---|---|---|"]
