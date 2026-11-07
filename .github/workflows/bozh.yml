@@ -1,0 +1,20 @@
+name: bozh
+# Manual. Deterministic Chinese<->Tibetan term alignment sample from the MITRA parallel layer (read-only against the corpus server).
+on:
+  workflow_dispatch:
+    inputs:
+      docs: {description: "comma-separated zh doc ids", required: true, default: "T08n0235,T12n0366,T14n0475"}
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+concurrency: {group: "${{ github.workflow }}", cancel-in-progress: true}
+jobs:
+  bozh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input requests
+      - run: BOZH_DOCS="${{ inputs.docs }}" INDRA_SITE="${{ inputs.site }}" python3 -m indra.bozh /tmp/bozh
+      - if: always()
+        run: head -c 6000 /tmp/bozh/bozh.json >> "$GITHUB_STEP_SUMMARY" || true
