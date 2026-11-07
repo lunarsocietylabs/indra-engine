@@ -5,7 +5,7 @@ bozh.py — 汉藏"因子对齐"样本：用 MITRA 汉藏对照段（CC BY-SA 4.
 
 方法（无模型、无人工）：
   1. 取对照段 score>=MIN_SCORE；汉文侧用丁福保词头表做最长优先识别，得到每段的汉文词集合；
-     藏文侧按音节（་）取 1–3 音节串。
+     藏文侧按音节（་）取 1–4 音节串。
   2. 对每个汉文词 t：c(t,b)=同段共现数；Dice=2c/(df_t+df_b)；取 Dice 最高的 b，要求 c>=MIN_C、Dice>=MIN_DICE。
   3. 无人工验证：同一汉文词在不同经（金刚/弥陀/维摩…）里各自独立对齐，看最佳藏文是否一致。
 只对齐词，不翻译；每个结论都能回到具体的汉文行号（zh_lb）和藏文原文。
@@ -36,7 +36,7 @@ def syllables(bo):
     return [s for s in PUNCT.sub("་", bo).split("་") if s]
 
 
-def bo_ngrams(bo, nmax=3):
+def bo_ngrams(bo, nmax=4):
     s = syllables(bo)
     out = set()
     for n in range(1, nmax + 1):
@@ -90,7 +90,13 @@ def align(pairs, heads, maxlen):
             cand.append((d, c, -len(b), b))
         if not cand:
             continue
-        d, c, _, b = max(cand)
+        top = max(x[0] for x in cand)
+        tied = [x for x in cand if x[0] >= top - 1e-9]
+        longest = max(tied, key=lambda x: (len(x[3]), x[1]))
+        # 并列最优且彼此不是子串关系 = 无法区分（词在样本里总是成对出现），不下结论
+        if any(x[3] not in longest[3] for x in tied):
+            continue
+        d, c, _, b = longest
         if d >= MIN_DICE:
             best[t] = (b, c, round(d, 3), df_t[t], df_b[b], where[t][b])
     return best, df_t
