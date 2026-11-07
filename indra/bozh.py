@@ -19,6 +19,8 @@ MIN_SCORE = float(os.environ.get("BOZH_MIN_SCORE", "0.9"))
 MIN_C = int(os.environ.get("BOZH_MIN_C", "3"))
 MIN_DICE = float(os.environ.get("BOZH_MIN_DICE", "0.6"))
 DOCS = os.environ.get("BOZH_DOCS", "T08n0235,T12n0366,T14n0475").split(",")
+CAP_FRAC = float(os.environ.get("BOZH_CAP_FRAC", "0.02"))
+WORKERS = int(os.environ.get("BOZH_WORKERS", "8"))
 PUNCT = re.compile(r"[\s།༎༏༐༑༔,;/]+")
 
 
@@ -62,88 +64,88 @@ def zh_terms(text, heads, maxlen):
 
 
 def align(pairs, heads, maxlen):
-    """pairs: [(zh_text, bo_text, lb)] -> {term: (best_bo, c, dice, df_t, df_b, lbs[:3])}"""
+    """pairs: [(zh_text, bo_text, lb)] -> ({term: (best_bo, c, dice, df_t, df_b, lbs[:3])}, df_t)
+    两遍：先数全体 df，再只对 df>=MIN_C 且不过于常见的藏文串累计共现（过常见的多是助词，对词义对应无益）。"""
+    N = len(pairs)
+    cap = max(50, int(CAP_FRAC * N))
+    T_of, B_of = [], []
     df_t, df_b = collections.Counter(), collections.Counter()
+    for zh, bo, lb in pairs:
+        T = zh_terms(zh, heads, maxlen); B = bo_ngrams(bo)
+        T_of.append(T); B_of.append(B)
+        df_t.update(T); df_b.update(B)
+    keep_b = {b for b, n in df_b.items() if MIN_C <= n <= cap}
     co = collections.defaultdict(collections.Counter)
     where = collections.defaultdict(lambda: collections.defaultdict(list))
-    for zh, bo, lb in pairs:
-        T = zh_terms(zh, heads, maxlen)
-        B = bo_ngrams(bo)
+    for (zh, bo, lb), T, B in zip(pairs, T_of, B_of):
+        Bk = [b for b in B if b in keep_b]
         for t in T:
-            df_t[t] += 1
-        for b in B:
-            df_b[b] += 1
-        for t in T:
-            for b in B:
-                co[t][b] += 1
-                if len(where[t][b]) < 3:
-                    where[t][b].append(lb)
+            if df_t[t] < MIN_C:
+                continue
+            ct = co[t]
+            for b in Bk:
+                ct[b] += 1
     best = {}
     for t, cb in co.items():
-        if df_t[t] < MIN_C:
-            continue
         cand = []
         for b, c in cb.items():
             if c < MIN_C:
                 continue
             d = 2 * c / (df_t[t] + df_b[b])
-            cand.append((d, c, -len(b), b))
+            cand.append((d, c, len(b), b))
         if not cand:
             continue
         top = max(x[0] for x in cand)
         tied = [x for x in cand if x[0] >= top - 1e-9]
-        longest = max(tied, key=lambda x: (len(x[3]), x[1]))
-        # 并列最优且彼此不是子串关系 = 无法区分（词在样本里总是成对出现），不下结论
+        longest = max(tied, key=lambda x: (x[2], x[1]))
         if any(x[3] not in longest[3] for x in tied):
             continue
-        d, c, _, b = longest
+        d, c, _, bb = longest
         if d >= MIN_DICE:
-            best[t] = (b, c, round(d, 3), df_t[t], df_b[b], where[t][b])
+            locs = [lb for (zh, bo, lb), T, B in zip(pairs, T_of, B_of) if t in T and bb in B][:3]
+            best[t] = (bb, c, round(d, 3), df_t[t], df_b[bb], locs)
     return best, df_t
 
 
 def main(out):
+    from concurrent.futures import ThreadPoolExecutor
+    import hashlib
     t0 = time.time()
     heads = set(requests.get(f"{SITE}/data/lexicon-preview/heads.json", timeout=120).json())
     maxlen = max(len(h) for h in heads)
     man = requests.get(f"{SITE}/data/tibetan/manifest.json", timeout=120).json()["files"]
-    R = {"min_score": MIN_SCORE, "min_c": MIN_C, "min_dice": MIN_DICE, "docs": {}}
-    per = {}
-    for d in DOCS:
-        if d not in man:
-            R["docs"][d] = "not in alignment manifest"; continue
-        rows = fetch_rows(d, man[d])
-        pairs = [("".join(r["zh_text"]), " ".join(r["bo_unicode"]), r["zh_lb"]) for r in rows if r.get("score", 0) >= MIN_SCORE]
-        best, df_t = align(pairs, heads, maxlen)
-        eligible = [t for t, n in df_t.items() if n >= MIN_C]
-        per[d] = best
-        R["docs"][d] = {"rows": len(rows), "kept": len(pairs), "terms_seen": len(df_t), "terms_eligible": len(eligible),
-                        "aligned": len(best), "aligned_rate": round(len(best) / max(1, len(eligible)), 3)}
-        print(d, json.dumps(R["docs"][d], ensure_ascii=False), flush=True)
-    # 跨经一致性：同一汉文词在两部以上经里各自独立对齐，最佳藏文是否一致（相同或互为子串）
-    shared = collections.defaultdict(dict)
-    for d, best in per.items():
-        for t, v in best.items():
-            shared[t][d] = v[0]
-    multi = {t: v for t, v in shared.items() if len(v) >= 2}
+    docs = list(man) if DOCS == ["ALL"] else [d for d in DOCS if d in man]
+    R = {"min_score": MIN_SCORE, "min_c": MIN_C, "min_dice": MIN_DICE, "cap_frac": CAP_FRAC, "docs_used": len(docs)}
 
-    def same(a, b):
-        return a == b or a in b or b in a
-    agree = [t for t, v in multi.items() if all(same(x, y) for x in v.values() for y in v.values())]
-    R["cross_doc"] = {"terms_in_2plus_docs": len(multi), "consistent": len(agree),
-                      "rate": round(len(agree) / max(1, len(multi)), 3)}
-    ex = []
-    for t in sorted(agree, key=lambda t: -len(multi[t]))[:40]:
-        ex.append({"zh": t, "bo": multi[t]})
-    bad = [{"zh": t, "bo": multi[t]} for t in multi if t not in agree][:20]
-    R["examples_consistent"], R["examples_inconsistent"] = ex, bad
+    def get(d):
+        rows = fetch_rows(d, man[d])
+        return d, [("".join(r["zh_text"]), " ".join(r["bo_unicode"]), r["zh_lb"]) for r in rows if r.get("score", 0) >= MIN_SCORE]
+    with ThreadPoolExecutor(WORKERS) as ex:
+        got = list(ex.map(get, docs))
+    print("fetched", len(got), "docs in", round(time.time() - t0, 1), "s", flush=True)
+    allp = [x for d, ps in got for x in ps]
+    R["pairs"] = len(allp)
+    best, df_t = align(allp, heads, maxlen)
+    elig = [t for t, n in df_t.items() if n >= MIN_C]
+    R["all"] = {"terms_seen": len(df_t), "terms_eligible": len(elig), "aligned": len(best), "aligned_rate": round(len(best) / max(1, len(elig)), 3)}
+    print("ALL", json.dumps(R["all"], ensure_ascii=False), flush=True)
+    # 无人工验证：按文献哈希分成两半，各自独立对齐，看同一汉文词的最佳藏文是否一致
+    half = lambda d: int(hashlib.md5(d.encode()).hexdigest(), 16) % 2
+    A = [x for d, ps in got if half(d) == 0 for x in ps]; B = [x for d, ps in got if half(d) == 1 for x in ps]
+    bA, _ = align(A, heads, maxlen); bB, _ = align(B, heads, maxlen)
+    both = [t for t in bA if t in bB]
+    same = lambda a, b: a == b or a in b or b in a
+    agree = [t for t in both if same(bA[t][0], bB[t][0])]
+    R["split_half"] = {"pairs_A": len(A), "pairs_B": len(B), "aligned_A": len(bA), "aligned_B": len(bB),
+                       "terms_in_both": len(both), "consistent": len(agree), "rate": round(len(agree) / max(1, len(both)), 3)}
+    R["examples_consistent"] = [{"zh": t, "bo": bA[t][0], "dice": bA[t][2], "df": bA[t][3]} for t in sorted(agree, key=lambda t: -bA[t][3])[:40]]
+    R["examples_inconsistent"] = [{"zh": t, "A": bA[t][0], "B": bB[t][0]} for t in both if t not in agree][:20]
     os.makedirs(out, exist_ok=True)
     json.dump(R, open(os.path.join(out, "bozh.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    json.dump({d: {t: v[:2] + v[2:5] for t, v in b.items()} for d, b in per.items()},
-              open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
-    print(json.dumps({k: R[k] for k in ("docs", "cross_doc")}, ensure_ascii=False, indent=1))
-    print("EXAMPLES", json.dumps(ex[:25], ensure_ascii=False))
-    print("INCONSISTENT", json.dumps(bad[:10], ensure_ascii=False))
+    json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    print(json.dumps({k: R[k] for k in ("docs_used", "pairs", "all", "split_half")}, ensure_ascii=False, indent=1))
+    print("EXAMPLES", json.dumps(R["examples_consistent"][:30], ensure_ascii=False))
+    print("INCONSISTENT", json.dumps(R["examples_inconsistent"][:12], ensure_ascii=False))
     print("seconds", round(time.time() - t0, 1))
 
 
