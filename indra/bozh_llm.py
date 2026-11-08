@@ -35,7 +35,11 @@ def ask(key, term, item, timeout=60):
             "thinking": {"type": "disabled"},
             "messages": [{"role": "system", "content": SYS},
                          {"role": "user", "content": f"汉文词：{term}\n\n候选：\n{cl}\n\n例句：\n{ex}"}]}
-    r = requests.post(API, headers={"Authorization": "Bearer " + key}, json=body, timeout=timeout)
+    for attempt in range(5):
+        r = requests.post(API, headers={"Authorization": "Bearer " + key}, json=body, timeout=timeout)
+        if r.status_code in (429, 500, 502, 503, 504):
+            time.sleep(2 ** attempt); continue
+        break
     if r.status_code != 200:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200].replace(key, '[KEY]')}")
     txt = r.json()["choices"][0]["message"]["content"]
@@ -51,18 +55,27 @@ def main(cands_path, out, limit):
     terms = list(C)[:limit]
     acc, rej, err = {}, [], 0
     t0 = time.time()
-    for i, t in enumerate(terms):
+    from concurrent.futures import ThreadPoolExecutor
+    W = int(os.environ.get("BOZH_WORKERS", "8"))
+
+    def one(t):
         it = C[t]
         if not it["cands"]:
-            continue
+            return t, None, None
         try:
-            pick = ask(key, t, it)
+            return t, ask(key, t, it), None
         except Exception as e:
+            return t, None, str(e)[:200]
+    with ThreadPoolExecutor(W) as ex:
+        results = list(ex.map(one, terms))
+    for i, (t, pick, e) in enumerate(results):
+        it = C[t]
+        if e:
             err += 1
             if err <= 3:
-                print("ERR", t, str(e)[:200], flush=True)
-            if err >= 8 and not acc:
-                sys.exit("too many errors, stopping")
+                print("ERR", t, e, flush=True)
+            continue
+        if pick is None:
             continue
         hit = it["cands"][pick - 1] if 1 <= pick <= len(it["cands"]) else None
         if hit is None:
@@ -73,11 +86,11 @@ def main(cands_path, out, limit):
         shown = hit.get("show", hit["bo"])
         if ok:
             acc[t] = {"bo": shown, "c": hit["c"], "df": it["df"], "cov": round(cov, 3), "prec": round(prec, 3), "dice": hit["dice"],
-                      "lbs": [e["lb"] for e in it["examples"]]}
+                      "lbs": [x["lb"] for x in it["examples"]]}
         else:
             rej.append({"zh": t, "why": f"cov {cov:.2f}, prec {prec:.2f}", "pick": shown})
-        if (i + 1) % 100 == 0:
-            print(i + 1, "asked,", len(acc), "accepted", flush=True)
+    if err > len(terms) * 0.2:
+        sys.exit(f"too many errors: {err}/{len(terms)}")
     R = {"model": MODEL, "asked": len(terms), "accepted": len(acc), "rejected": len(rej), "errors": err,
          "min_cov": MIN_COV, "min_prec": MIN_PREC, "low_cov": LOW_COV, "seconds": round(time.time() - t0, 1)}
     os.makedirs(out, exist_ok=True)
