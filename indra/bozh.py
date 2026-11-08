@@ -80,23 +80,24 @@ def zh_terms(text, heads, maxlen):
 
 def align(pairs, heads, maxlen, ctx=None):
     """pairs: [(zh_text, bo_text, lb)] -> ({term: (best_bo, c, dice, df_t, df_b, lbs[:3])}, df_t)
-    两遍：先数全体 df，再只对 df>=MIN_C 且不过于常见的藏文串累计共现（过常见的多是助词，对词义对应无益）。"""
+    两遍：先数全体 df，再只对 df>=MIN_C 且不过于常见的藏文串累计共现（过常见的多是助词）。
+    省内存：不保留每段的藏文串集合，第二遍按需重算（私有仓库 runner 只有 7 GB）。"""
     N = len(pairs)
     cap = max(50, int(CAP_FRAC * N))
-    T_of, B_of = [], []
+    T_of = []
     df_t, df_b = collections.Counter(), collections.Counter()
     for zh, bo, lb in pairs:
-        T = zh_terms(zh, heads, maxlen); B = bo_ngrams(bo)
-        T_of.append(T); B_of.append(B)
-        df_t.update(T); df_b.update(B)
+        T = zh_terms(zh, heads, maxlen)
+        T_of.append(T)
+        df_t.update(T); df_b.update(bo_ngrams(bo))
     keep_b = {b for b, n in df_b.items() if MIN_C <= n <= cap}
     co = collections.defaultdict(collections.Counter)
-    where = collections.defaultdict(lambda: collections.defaultdict(list))
-    for (zh, bo, lb), T, B in zip(pairs, T_of, B_of):
-        Bk = [b for b in B if b in keep_b]
-        for t in T:
-            if df_t[t] < MIN_C:
-                continue
+    for (zh, bo, lb), T in zip(pairs, T_of):
+        Tk = [t for t in T if df_t[t] >= MIN_C]
+        if not Tk:
+            continue
+        Bk = [b for b in bo_ngrams(bo) if b in keep_b]
+        for t in Tk:
             ct = co[t]
             for b in Bk:
                 ct[b] += 1
@@ -117,10 +118,24 @@ def align(pairs, heads, maxlen, ctx=None):
             continue
         d, c, _, bb = longest
         if d >= MIN_DICE:
-            locs = [lb for (zh, bo, lb), T, B in zip(pairs, T_of, B_of) if t in T and bb in B][:3]
-            best[t] = (bb, c, round(d, 3), df_t[t], df_b[bb], locs)
+            best[t] = (bb, c, round(d, 3), df_t[t], df_b[bb], [])
+    # 例句行号：按词建倒排，只扫含该词的段
+    if best:
+        inv = collections.defaultdict(list)
+        for i, T in enumerate(T_of):
+            for t in T:
+                if t in best:
+                    inv[t].append(i)
+        for t, v in list(best.items()):
+            locs = []
+            for i in inv.get(t, ()):
+                if v[0] in bo_ngrams(pairs[i][1]):
+                    locs.append(pairs[i][2])
+                    if len(locs) == 3:
+                        break
+            best[t] = v[:5] + (locs,)
     if ctx is not None:
-        ctx.update(co=co, df_b=df_b, T_of=T_of, B_of=B_of)
+        ctx.update(co=co, df_b=df_b, T_of=T_of)
     return best, df_t
 
 
@@ -166,6 +181,13 @@ def main(out):
     ctx.clear(); import gc; gc.collect()  # 释放大表，再做对半验证（避免内存叠加）
     # 无人工验证：按文献哈希分成两半，各自独立对齐，看同一汉文词的最佳藏文是否一致
     half = lambda d: int(hashlib.md5(d.encode()).hexdigest(), 16) % 2
+    if os.environ.get('BOZH_HALF', '1') != '1':
+        R['split_half'] = 'skipped'
+        os.makedirs(out, exist_ok=True)
+        json.dump(R, open(os.path.join(out, 'bozh.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+        json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, 'pairs.json'), 'w', encoding='utf-8'), ensure_ascii=False)
+        json.dump(cands, open(os.path.join(out, 'cands.json'), 'w', encoding='utf-8'), ensure_ascii=False)
+        print(json.dumps({k: R[k] for k in ('docs_used', 'pairs', 'all')}, ensure_ascii=False)); return
     A = [x for d, ps in got if half(d) == 0 for x in ps]; B = [x for d, ps in got if half(d) == 1 for x in ps]
     bA, _ = align(A, heads, maxlen); bB, _ = align(B, heads, maxlen)
     both = [t for t in bA if t in bB]
