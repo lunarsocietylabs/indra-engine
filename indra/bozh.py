@@ -63,7 +63,7 @@ def zh_terms(text, heads, maxlen):
     return out
 
 
-def align(pairs, heads, maxlen):
+def align(pairs, heads, maxlen, ctx=None):
     """pairs: [(zh_text, bo_text, lb)] -> ({term: (best_bo, c, dice, df_t, df_b, lbs[:3])}, df_t)
     两遍：先数全体 df，再只对 df>=MIN_C 且不过于常见的藏文串累计共现（过常见的多是助词，对词义对应无益）。"""
     N = len(pairs)
@@ -104,6 +104,8 @@ def align(pairs, heads, maxlen):
         if d >= MIN_DICE:
             locs = [lb for (zh, bo, lb), T, B in zip(pairs, T_of, B_of) if t in T and bb in B][:3]
             best[t] = (bb, c, round(d, 3), df_t[t], df_b[bb], locs)
+    if ctx is not None:
+        ctx.update(co=co, df_b=df_b, T_of=T_of, B_of=B_of)
     return best, df_t
 
 
@@ -125,7 +127,8 @@ def main(out):
     print("fetched", len(got), "docs in", round(time.time() - t0, 1), "s", flush=True)
     allp = [x for d, ps in got for x in ps]
     R["pairs"] = len(allp)
-    best, df_t = align(allp, heads, maxlen)
+    ctx = {}
+    best, df_t = align(allp, heads, maxlen, ctx)
     elig = [t for t, n in df_t.items() if n >= MIN_C]
     R["all"] = {"terms_seen": len(df_t), "terms_eligible": len(elig), "aligned": len(best), "aligned_rate": round(len(best) / max(1, len(elig)), 3)}
     print("ALL", json.dumps(R["all"], ensure_ascii=False), flush=True)
@@ -140,9 +143,26 @@ def main(out):
                        "terms_in_both": len(both), "consistent": len(agree), "rate": round(len(agree) / max(1, len(both)), 3)}
     R["examples_consistent"] = [{"zh": t, "bo": bA[t][0], "dice": bA[t][2], "df": bA[t][3]} for t in sorted(agree, key=lambda t: -bA[t][3])[:40]]
     R["examples_inconsistent"] = [{"zh": t, "A": bA[t][0], "B": bB[t][0]} for t in both if t not in agree][:20]
+    # 给没配上的高频词留候选（供"提议-核验"一步使用）：每词 top-K 藏文串（按 Dice）+ 3 个短例句
+    NT = int(os.environ.get("BOZH_CAND_TERMS", "1500")); K = 8
+    un = sorted((t for t in elig if t not in best), key=lambda t: -df_t[t])[:NT]
+    need = set(un); ex = {t: [] for t in un}
+    for (zh, bo, lb), T in zip(allp, ctx["T_of"]):
+        for t in T & need:
+            if len(ex[t]) < 40:
+                ex[t].append((len(zh) + len(bo), zh, bo, lb))
+    cands = {}
+    for t in un:
+        cb = ctx["co"].get(t, {})
+        lst = sorted(((2 * c / (df_t[t] + ctx["df_b"][b]), c, b) for b, c in cb.items() if c >= MIN_C), key=lambda x: (-x[0], -len(x[2])))[:K]
+        shots = sorted(ex[t])[:3]
+        cands[t] = {"df": df_t[t], "cands": [{"bo": b, "c": c, "dice": round(d, 3)} for d, c, b in lst],
+                    "examples": [{"zh": z, "bo": b_, "lb": l} for _, z, b_, l in shots]}
+    R["unaligned_with_candidates"] = len(cands)
     os.makedirs(out, exist_ok=True)
     json.dump(R, open(os.path.join(out, "bozh.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    json.dump(cands, open(os.path.join(out, "cands.json"), "w", encoding="utf-8"), ensure_ascii=False)
     print(json.dumps({k: R[k] for k in ("docs_used", "pairs", "all", "split_half")}, ensure_ascii=False, indent=1))
     print("EXAMPLES", json.dumps(R["examples_consistent"][:30], ensure_ascii=False))
     print("INCONSISTENT", json.dumps(R["examples_inconsistent"][:12], ensure_ascii=False))
