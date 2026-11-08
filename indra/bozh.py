@@ -53,6 +53,20 @@ def syllables(bo):
     return [_stem(s) for s in PUNCT.sub("་", bo).split("་") if s]
 
 
+def surface_map(pairs):
+    """归一化音节 -> 最常见的原写法，仅用于展示（统计一律用归一化形式）。"""
+    cnt = collections.defaultdict(collections.Counter)
+    for _, bo, _ in pairs:
+        for raw in PUNCT.sub("་", bo).split("་"):
+            if raw:
+                cnt[_stem(raw)][raw] += 1
+    return {k: v.most_common(1)[0][0] for k, v in cnt.items()}
+
+
+def show(b, smap):
+    return "་".join(smap.get(x, x) for x in b.split("་"))
+
+
 def bo_ngrams(bo, nmax=4):
     s = syllables(bo)
     out = set()
@@ -157,6 +171,7 @@ def main(out):
     print("fetched", len(got), "docs in", round(time.time() - t0, 1), "s", flush=True)
     allp = [x for d, ps in got for x in ps]
     R["pairs"] = len(allp)
+    smap = surface_map(allp)
     ctx = {}
     best, df_t = align(allp, heads, maxlen, ctx)
     elig = [t for t, n in df_t.items() if n >= MIN_C]
@@ -175,7 +190,7 @@ def main(out):
         cb = ctx["co"].get(t, {})
         lst = sorted(((2 * c / (df_t[t] + ctx["df_b"][b]), c, b) for b, c in cb.items() if c >= MIN_C), key=lambda x: (-x[0], -len(x[2])))[:K]
         shots = sorted(ex[t])[:3]
-        cands[t] = {"df": df_t[t], "cands": [{"bo": b, "c": c, "dice": round(d, 3)} for d, c, b in lst],
+        cands[t] = {"df": df_t[t], "cands": [{"bo": b, "show": show(b, smap), "c": c, "dice": round(d, 3), "dfb": ctx["df_b"][b]} for d, c, b in lst],
                     "examples": [{"zh": z, "bo": b_, "lb": l} for _, z, b_, l in shots]}
     R["unaligned_with_candidates"] = len(cands)
     ctx.clear(); import gc; gc.collect()  # 释放大表，再做对半验证（避免内存叠加）
@@ -185,7 +200,7 @@ def main(out):
         R['split_half'] = 'skipped'
         os.makedirs(out, exist_ok=True)
         json.dump(R, open(os.path.join(out, 'bozh.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-        json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, 'pairs.json'), 'w', encoding='utf-8'), ensure_ascii=False)
+        json.dump({t: list(v) + [show(v[0], smap)] for t, v in best.items()}, open(os.path.join(out, 'pairs.json'), 'w', encoding='utf-8'), ensure_ascii=False)
         json.dump(cands, open(os.path.join(out, 'cands.json'), 'w', encoding='utf-8'), ensure_ascii=False)
         print(json.dumps({k: R[k] for k in ('docs_used', 'pairs', 'all')}, ensure_ascii=False)); return
     A = [x for d, ps in got if half(d) == 0 for x in ps]; B = [x for d, ps in got if half(d) == 1 for x in ps]
@@ -199,7 +214,7 @@ def main(out):
     R["examples_inconsistent"] = [{"zh": t, "A": bA[t][0], "B": bB[t][0]} for t in both if t not in agree][:20]
     os.makedirs(out, exist_ok=True)
     json.dump(R, open(os.path.join(out, "bozh.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    json.dump({t: list(v) + [show(v[0], smap)] for t, v in best.items()}, open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
     json.dump(cands, open(os.path.join(out, "cands.json"), "w", encoding="utf-8"), ensure_ascii=False)
     print(json.dumps({k: R[k] for k in ("docs_used", "pairs", "all", "split_half")}, ensure_ascii=False, indent=1))
     print("EXAMPLES", json.dumps(R["examples_consistent"][:30], ensure_ascii=False))
