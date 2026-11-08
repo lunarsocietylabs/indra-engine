@@ -132,17 +132,6 @@ def main(out):
     elig = [t for t, n in df_t.items() if n >= MIN_C]
     R["all"] = {"terms_seen": len(df_t), "terms_eligible": len(elig), "aligned": len(best), "aligned_rate": round(len(best) / max(1, len(elig)), 3)}
     print("ALL", json.dumps(R["all"], ensure_ascii=False), flush=True)
-    # 无人工验证：按文献哈希分成两半，各自独立对齐，看同一汉文词的最佳藏文是否一致
-    half = lambda d: int(hashlib.md5(d.encode()).hexdigest(), 16) % 2
-    A = [x for d, ps in got if half(d) == 0 for x in ps]; B = [x for d, ps in got if half(d) == 1 for x in ps]
-    bA, _ = align(A, heads, maxlen); bB, _ = align(B, heads, maxlen)
-    both = [t for t in bA if t in bB]
-    same = lambda a, b: a == b or a in b or b in a
-    agree = [t for t in both if same(bA[t][0], bB[t][0])]
-    R["split_half"] = {"pairs_A": len(A), "pairs_B": len(B), "aligned_A": len(bA), "aligned_B": len(bB),
-                       "terms_in_both": len(both), "consistent": len(agree), "rate": round(len(agree) / max(1, len(both)), 3)}
-    R["examples_consistent"] = [{"zh": t, "bo": bA[t][0], "dice": bA[t][2], "df": bA[t][3]} for t in sorted(agree, key=lambda t: -bA[t][3])[:40]]
-    R["examples_inconsistent"] = [{"zh": t, "A": bA[t][0], "B": bB[t][0]} for t in both if t not in agree][:20]
     # 给没配上的高频词留候选（供"提议-核验"一步使用）：每词 top-K 藏文串（按 Dice）+ 3 个短例句
     NT = int(os.environ.get("BOZH_CAND_TERMS", "1500")); K = 8
     un = sorted((t for t in elig if t not in best), key=lambda t: -df_t[t])[:NT]
@@ -159,6 +148,18 @@ def main(out):
         cands[t] = {"df": df_t[t], "cands": [{"bo": b, "c": c, "dice": round(d, 3)} for d, c, b in lst],
                     "examples": [{"zh": z, "bo": b_, "lb": l} for _, z, b_, l in shots]}
     R["unaligned_with_candidates"] = len(cands)
+    ctx.clear(); import gc; gc.collect()  # 释放大表，再做对半验证（避免内存叠加）
+    # 无人工验证：按文献哈希分成两半，各自独立对齐，看同一汉文词的最佳藏文是否一致
+    half = lambda d: int(hashlib.md5(d.encode()).hexdigest(), 16) % 2
+    A = [x for d, ps in got if half(d) == 0 for x in ps]; B = [x for d, ps in got if half(d) == 1 for x in ps]
+    bA, _ = align(A, heads, maxlen); bB, _ = align(B, heads, maxlen)
+    both = [t for t in bA if t in bB]
+    same = lambda a, b: a == b or a in b or b in a
+    agree = [t for t in both if same(bA[t][0], bB[t][0])]
+    R["split_half"] = {"pairs_A": len(A), "pairs_B": len(B), "aligned_A": len(bA), "aligned_B": len(bB),
+                       "terms_in_both": len(both), "consistent": len(agree), "rate": round(len(agree) / max(1, len(both)), 3)}
+    R["examples_consistent"] = [{"zh": t, "bo": bA[t][0], "dice": bA[t][2], "df": bA[t][3]} for t in sorted(agree, key=lambda t: -bA[t][3])[:40]]
+    R["examples_inconsistent"] = [{"zh": t, "A": bA[t][0], "B": bB[t][0]} for t in both if t not in agree][:20]
     os.makedirs(out, exist_ok=True)
     json.dump(R, open(os.path.join(out, "bozh.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     json.dump({t: list(v) for t, v in best.items()}, open(os.path.join(out, "pairs.json"), "w", encoding="utf-8"), ensure_ascii=False)
