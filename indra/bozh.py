@@ -34,8 +34,19 @@ def fetch_rows(doc, files):
     return rows
 
 
+# 藏文助词会粘在音节末尾（属格 འི 等），同一个词因此有多种写法；统计前先去掉，使其算同一个词
+SUFFIXES = ("འི", "འང")
+
+
+def _stem(syl):
+    for suf in SUFFIXES:
+        if syl.endswith(suf) and len(syl) > len(suf):
+            return syl[: -len(suf)]
+    return syl
+
+
 def syllables(bo):
-    return [s for s in PUNCT.sub("་", bo).split("་") if s]
+    return [_stem(s) for s in PUNCT.sub("་", bo).split("་") if s]
 
 
 def bo_ngrams(bo, nmax=4):
