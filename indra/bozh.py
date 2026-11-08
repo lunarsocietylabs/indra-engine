@@ -39,9 +39,13 @@ SUFFIXES = ("འི", "འང")
 
 
 def _stem(syl):
+    # 先去属格 འི / འང，再去末尾的 འ：དཔའི 与 དཔའ（词根带 འ）归一为同一形式，པའི→པ、པ→པ
     for suf in SUFFIXES:
         if syl.endswith(suf) and len(syl) > len(suf):
-            return syl[: -len(suf)]
+            syl = syl[: -len(suf)]
+            break
+    if syl.endswith("འ") and len(syl) > 1:
+        syl = syl[:-1]
     return syl
 
 
