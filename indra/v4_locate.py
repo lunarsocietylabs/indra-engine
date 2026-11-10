@@ -15,9 +15,10 @@ v3 回答"疏文里哪几个字是引的经"。v4 回答"这一整段疏文在�
            于是链得分近似"这是真引文 相对 碰巧相同"的对数几率，不是手调的权重。
   4. 补认   链上相邻两个锚点之间，再在**那一小段经文窗口**里找二字以上的短牒文（"言空者""色者"）。窗口小，所以短也有据。
   5. 异文   同一斜线上只隔一两个字的两个锚点并成一处引文，记下差了几个字（异体、通假、脱衍），不当作两处。
-  6. 门槛   同一部疏、同样的流程，去比对若干部同样长度的"假经"（无关文献的窗口）。每个锚点有"局部支持度"
-           （它周围一段疏文里链的净得分）。真经与假经的支持度分布一比，就得到任一门槛下的假发现率（FDR）。
-           確层 = FDR≤1%，候层 = FDR≤10%，其余不出。门槛由数据定，不由人定。
+  6. 门槛   同一部疏、同样的流程，去比对若干部同样长度的"假经"（无关文献的窗口）。每个锚点有两个量：
+           "局部支持度"（它周围一段疏文里链的净得分）和"局部覆盖度"（它周围那段经文被就近牒到了多少）。
+           真经与假经一比，就得到任一门槛下的假发现率（FDR）。確层 = FDR≤1%，候层 = FDR≤10%，其余不出。
+           门槛由数据定，不由人定（见 thresholds_all）。
   7. 归属   只用过了门槛的锚点。两个锚点之间的释文：
              前后锚点在同一句或紧邻两句 → 归前一句（先牒后释），层级取两端较低者；
              中间跳过了若干句 → 归"前一句至后一句之前"这个区间，降为候层（除非略牒文法另有明文，见 v4_grammar）；
@@ -314,11 +315,16 @@ def merge_near(chs, tol=2):
     return n
 
 
-def support(chs, R=300):
+RADIUS = 300
+
+
+def support(chs, pre=None, lenS=0, R=None):
     """每个（非补认）锚点的局部支持度：同一条链上、疏文距离 ≤R 的非补认锚点净得分之和。
     补认的短牒文取它所在位置的同一数值，但不计入返回的列表（零分布只比主锚点）。
-    同时把锚点统一成字典：{i, j, L, Ls, w, net, weak, var, sup}。"""
+    另给每个主锚点"局部覆盖度" cov（见 _cover；pre 是经文逐字信息量前缀和）。返回 [(sup, cov)]。
+    同时把锚点统一成字典：{i, j, L, Ls, w, net, weak, var, sup, cov}。"""
     allv = []
+    R = R or RADIUS
     for ch in chs:
         A = []
         for a in ch["anchors"]:
@@ -329,15 +335,20 @@ def support(chs, R=300):
         A.sort(key=lambda a: (a["i"], a["j"]))
         M = [a for a in A if not a["weak"]]
         pos = [a["i"] for a in M]
-        pre = [0.0]
+        acc = [0.0]
         for a in M:
-            pre.append(pre[-1] + a["net"])
+            acc.append(acc[-1] + a["net"])
+        cov = _cover([(a["i"], a["j"], a["Ls"]) for a in M], pre, lenS) if pre is not None else [0.0] * len(M)
+        for a, c in zip(M, cov):
+            a["cov"] = round(c, 3)
         for a in A:
             lo = bisect.bisect_left(pos, a["i"] - R)
             hi = bisect.bisect_right(pos, a["i"] + R)
-            a["sup"] = pre[hi] - pre[lo]
+            a["sup"] = acc[hi] - acc[lo]
             if not a["weak"]:
-                allv.append(a["sup"])
+                allv.append((a["sup"], a["cov"]))
+            else:
+                a["cov"] = 0.0
         ch["anchors"] = A
     return allv
 
@@ -367,7 +378,7 @@ def join_diagonal(sd, W, tol=2):
     return out, Wo, Vo
 
 
-def pipeline(S, C, bg, decoys=(), **kw):
+def pipeline(S, C, bg, decoys=(), pre=None, **kw):
     """种子 → 信息量 → 并异文 → 成链 → 补认 → 支持度。给了 decoys 才做补认（假经自己走流程时不给）。"""
     sd = seeds(S, C)
     W = [bg.info(C[i:i + L]) for i, j, L in sd]
@@ -382,7 +393,7 @@ def pipeline(S, C, bg, decoys=(), **kw):
             a[6] = vmap.get((a[0], a[1], a[2]), 0)
     merge_near(chs)
     refine(S, C, chs, bg, decoys)
-    sup = support(chs)
+    sup = support(chs, pre if pre is not None else char_info(S, bg), len(S))
     return chs, sup
 
 
@@ -411,14 +422,39 @@ def thresholds(true_sup, decoy_sups, targets=(0.01, 0.10)):
     return res
 
 
-def tier_of(sup, th):
-    a, b = th.get(0.01), th.get(0.10)
+COV_GRID = (0.9, 0.8, 0.7, 0.6, 0.5)
+
+
+def thresholds_all(true_pairs, decoy_pairs, targets=(0.01, 0.10)):
+    """两个判据合用，错误率仍由假经来量。
+      判据一  支持度 ≥ t1（FDR≤1%）→ 確；≥ t10（FDR≤10%）→ 候。
+      判据二  支持度只到候层、但局部覆盖度 ≥ c 的锚点也升为確——c 取使"两条合起来"的 FDR 仍 ≤1% 的最宽值（没有则不启用）。
+    短牒文单看自己分量不够，但它前后的经文都被就近牒到（在逐句讲经），而假经上的零星相同做不到这一点。
+    返回 {0.01: t1, 0.10: t10, "cov": c 或 None}。"""
+    th = thresholds([p[0] for p in true_pairs], [[p[0] for p in d] for d in decoy_pairs], targets)
+    th["cov"] = None
+    t1, t10, D = th.get(targets[0]), th.get(targets[1]), len(decoy_pairs)
+    if t10 is None or not D:
+        return th
+    hi = t1 if t1 is not None else float("inf")
+    for c in COV_GRID:
+        nt = sum(1 for s, v in true_pairs if s >= hi or (s >= t10 and s > 0 and v >= c))
+        nd = sum(1 for d in decoy_pairs for s, v in d if s >= hi or (s >= t10 and s > 0 and v >= c))
+        if nt and (nd + 1) / (D * nt) <= targets[0]:
+            th["cov"] = c
+        else:
+            break
+    return th
+
+
+def tier_of(sup, th, cov=0.0):
+    a, b, c = th.get(0.01), th.get(0.10), th.get("cov")
     if sup <= 0:
         return None
     if a is not None and sup >= a:
         return SURE
     if b is not None and sup >= b:
-        return CAND
+        return SURE if (c is not None and cov >= c) else CAND
     return None
 
 
@@ -439,21 +475,21 @@ def char_info(S, bg):
     return out
 
 
-def _led(A, pre, lenS, near, half=40, need=0.5, far=8000):
-    """A: 一条链上的確层锚点 [(疏文位置 i, 经文位置 j, 经文长 Ls)]，按 i 排序。返回"在逐句讲经"的锚点下标集合。
-    判据：以该锚点为中心、前后各 half 字的那段经文，按信息量计，有 need 以上被它前后 near 字疏文内的確层引文牒到。
-    逐句讲经的地方必然如此；别的文献只是引到本经几句通用的话，则不然——后者只算引文，不带释文。"""
-    ok = set()
+def _cover(A, pre, lenS, near=3000, half=40, far=8000):
+    """A: 一条链上的锚点 [(疏文位置 i, 经文位置 j, 经文长 Ls)]，按 i 排序。返回每个锚点的"局部覆盖度"：
+    以它为中心、前后各 half 字的那段经文，按信息量计，有多大比例被它前后疏文内（near 字，或至少前后各两处，至多 far 字）的锚点牒到。
+    逐句讲经的地方接近 1；别的文献只是引到本经几句通用的话，则很低。"""
+    out = []
     pos = [a[0] for a in A]
     for k, (i, j, Ls) in enumerate(A):
-        left = max(near, i - pos[max(0, k - 2)])               # 至少看到前后各两处引文（一句讲了几千字时），但不超过 far
+        left = max(near, i - pos[max(0, k - 2)])
         right = max(near, pos[min(len(A) - 1, k + 2)] - i)
         lo = bisect.bisect_left(pos, i - min(left, far))
         hi_i = i + min(right, far)
         w0, w1 = max(0, j - half), min(lenS, j + Ls + half)
         tot = pre[w1] - pre[w0]
         if tot <= 0:
-            continue
+            out.append(0.0); continue
         iv = []
         z = lo
         while z < len(A) and A[z][0] <= hi_i:
@@ -467,9 +503,13 @@ def _led(A, pre, lenS, near, half=40, need=0.5, far=8000):
             a0 = max(a0, end)
             if a1 > a0:
                 got += pre[a1] - pre[a0]; end = a1
-        if got >= need * tot:
-            ok.add(k)
-    return ok
+        out.append(float(got / tot))
+    return out
+
+
+def _led(A, pre, lenS, near, need=0.5):
+    """確层锚点里"在逐句讲经"的那些（局部覆盖度 ≥ need，只按確层锚点算）。只有它们能带释文。"""
+    return {k for k, c in enumerate(_cover(A, pre, lenS, near)) if c >= need}
 
 
 def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reach_max=8000, tail_reach=300, near=3000):
@@ -487,7 +527,7 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
     for ci, ch in enumerate(chs):
         T = []
         for a in ch["anchors"]:
-            t = tier_of(a["sup"], th)
+            t = tier_of(a["sup"], th, a["cov"])
             if t and a["weak"] == 1:
                 t = CAND
             if t and not any(quote[a["i"]:a["i"] + a["L"]]):
@@ -587,7 +627,7 @@ def loo_exam(chs, th, bounds):
         return max(0, min(len(bounds) - 1, bisect.bisect_right(starts, j) - 1))
     n = wrong = 0
     for ch in chs:
-        T = [(a, tier_of(a["sup"], th)) for a in ch["anchors"]]
+        T = [(a, tier_of(a["sup"], th, a["cov"])) for a in ch["anchors"]]
         T = [(a, t) for a, t in T if t and not a["weak"]]
         for q in range(1, len(T) - 1):
             (p, tp), (a, ta), (b, tb) = T[q - 1], T[q], T[q + 1]
@@ -663,14 +703,14 @@ def locate(S, C, bounds=None, decoys=(), bg=None, th=None, para_starts=None, sin
     """th 给定则用它（整族汇总后的门槛）；否则用本疏自己的真假分布求门槛。没有假经又没有 th：一律不出（空结果）。"""
     bg = bg or Background([S, C])
     bounds = bounds or pseudo_bounds(len(S))
-    chs, sup = pipeline(S, C, bg, decoys)
-    dsup = [pipeline(D, C, bg)[1] for D in decoys]
     sinfo = sinfo if sinfo is not None else char_info(S, bg)
+    chs, sup = pipeline(S, C, bg, decoys, sinfo)
+    dsup = [pipeline(D, C, bg)[1] for D in decoys]
     return finish({"chains": chs, "sup_true": sup, "sup_decoy": dsup}, S, C, bounds, th, para_starts, sinfo)
 
 
 def finish(res, S, C, bounds, th=None, para_starts=None, sinfo=None):
-    th = th or thresholds(res["sup_true"], res["sup_decoy"])
+    th = th or thresholds_all(res["sup_true"], res["sup_decoy"])
     segs, cnt = attribute(res["chains"], C, bounds, th, para_starts, sinfo)
     res.update({"th": th, "segs": segs, "clauses": by_clause(segs, bounds),
                 "stats": stats(res["chains"], segs, cnt, bounds, len(S), len(C))})

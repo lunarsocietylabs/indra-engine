@@ -50,8 +50,8 @@ def prep_com(d):
 def _first(cid):
     g = _G
     C = g["coms"][cid]["C"]
-    chs, sup = V.pipeline(g["S"], C, g["bg"], g["decoys"])
-    return cid, chs, sup, [V.pipeline(D, C, g["bg"])[1] for D in g["decoys"]]
+    chs, sup = V.pipeline(g["S"], C, g["bg"], g["decoys"], g["sinfo"])
+    return cid, chs, sup, [V.pipeline(D, C, g["bg"], pre=p)[1] for D, p in zip(g["decoys"], g["dinfo"])]
 
 
 def exam_quotes(com, segs, S):
@@ -88,8 +88,9 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
     others = sorted((d for d in docs if d["fam"].startswith("com:") and d["fam"] != "com:" + fam),
                     key=lambda d: (sum(len(t) for _, t in d["paras"]) > 400000, d["id"]))[:NEG]
     coms = {d["id"]: prep_com(d) for d in own + others}
-    _G.clear(); _G.update({"S": S, "bg": bg, "decoys": decoys, "coms": coms})
     sinfo = V.char_info(S, bg)
+    _G.clear(); _G.update({"S": S, "bg": bg, "decoys": decoys, "coms": coms, "sinfo": sinfo,
+                           "dinfo": [V.char_info(D, bg) for D in decoys]})
     first = {}
     if workers > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("fork")) as ex:
@@ -100,7 +101,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
             _, chs, sup, dsup = _first(cid)
             first[cid] = {"chains": chs, "sup_true": sup, "sup_decoy": dsup}
     own_ids = [d["id"] for d in own]
-    th = V.thresholds([x for c in own_ids for x in first[c]["sup_true"]],
+    th = V.thresholds_all([x for c in own_ids for x in first[c]["sup_true"]],
                       [[x for c in own_ids for x in first[c]["sup_decoy"][z]] for z in range(len(decoys))])
     res, tally = {}, collections.Counter()
     for cid in sorted(coms):
@@ -278,7 +279,7 @@ def report(rows, out):
         vv = f"{v['v3_hit']} / {v['v4_quote']} / {v['v4_any']} / {v['v3_only']} / {v['v4_only']}（共 {v['matched']} 句）" if v else "—"
         th = s["th"]
         f = lambda x: "無" if x is None else f"{x:.1f}"
-        L.append(f"| {s['title']} | {f(th.get('0.01'))}/{f(th.get('0.1'))} | {s['decoys']} | {s['loo'][1]}/{s['loo'][0]} | {s['weak']} | {s['var']} | "
+        L.append(f"| {s['title']} | {f(th.get('0.01'))}/{f(th.get('0.1'))}，覆盖度 {th.get('cov')} | {s['decoys']} | {s['loo'][1]}/{s['loo'][0]} | {s['weak']} | {s['var']} | "
                  f"{s['links']}/{s['elide']} | {s['kepan_nodes']}/{s['kepan_attached']} | "
                  f"{sum(1 for l in s['layers'] if l['ok'])}/{len(s['layers'])} | {s['cites']} | {vv} | {s['seconds']} |")
     L += ["", "候层释文的原因（字数）：" + "；".join(f"{s['title']} {s['why']}（本族共 {s['own_chars']} 字）" for s in rows)]
@@ -307,6 +308,7 @@ if __name__ == "__main__":
     ap.add_argument("--only", default="")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--room", type=int, default=V.ROOM, help="主锚点信息量下限里的疏文自由度（越小越宽）")
+    ap.add_argument("--radius", type=int, default=V.RADIUS, help="局部支持度的疏文半径")
     a = ap.parse_args()
-    V.ROOM = a.room
+    V.ROOM, V.RADIUS = a.room, a.radius
     run(a.out, set(filter(None, a.only.split(","))), a.workers)

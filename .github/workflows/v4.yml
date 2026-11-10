@@ -7,7 +7,8 @@ on:
       site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
       only: {description: "Comma-separated families (heart,amitabha,diamond,vimalakirti,lotus); empty = all", default: "heart,amitabha"}
       room: {description: "Seed floor room (default 200; smaller = more permissive)", default: "200"}
-concurrency: {group: "${{ github.workflow }}-${{ github.ref }}-${{ inputs.only }}-${{ inputs.room }}", cancel-in-progress: true}
+      radius: {description: "Support radius in commentary characters (default 300)", default: "300"}
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}-${{ inputs.only }}-${{ inputs.room }}-${{ inputs.radius }}", cancel-in-progress: true}
 jobs:
   v4:
     runs-on: ubuntu-latest
@@ -18,5 +19,5 @@ jobs:
         with: {python-version: '3.11'}
       - run: pip install --quiet --no-input numpy requests
       - run: python3 -m tests.test_v4_locate && python3 -m tests.test_v4_modules
-      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.v4_run --out /tmp/v4 --only "${{ inputs.only }}" --room "${{ inputs.room }}" --workers 4
+      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.v4_run --out /tmp/v4 --only "${{ inputs.only }}" --room "${{ inputs.room }}" --radius "${{ inputs.radius }}" --workers 4
       - run: cat /tmp/v4/summary.md >> "$GITHUB_STEP_SUMMARY"
