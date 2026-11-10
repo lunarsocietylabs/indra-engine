@@ -1,0 +1,35 @@
+name: v4-shell
+# Manual only. Runs on free public-repo minutes; the private engine is fetched at run time and never printed.
+on:
+  workflow_dispatch:
+    inputs:
+      site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
+      only: {description: "Families or extra ids; empty = all", default: "heart,amitabha"}
+      extra: {description: "Extra target(s) fam:ID:titlekeyword[,..]", default: ""}
+      workers: {description: "Parallel workers", default: "4"}
+permissions:
+  contents: read
+concurrency: {group: "v4-shell-${{ inputs.only }}-${{ inputs.extra }}", cancel-in-progress: true}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install --quiet --no-input numpy requests
+      - name: Fetch private engine (quiet)
+        env: {T: "${{ secrets.ENGINE_READ_TOKEN }}"}
+        run: |
+          set +x
+          git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$T" | base64 -w0)" clone -q --depth 1 https://github.com/lunarsocietylabs/zelizuli.com.git /tmp/priv >/dev/null 2>&1 || { echo "clone failed (token lacks Contents: read?)"; exit 1; }
+          cp /tmp/priv/engine/v4/indra/*.py indra/
+          mkdir -p tests && touch tests/__init__.py && cp /tmp/priv/engine/v4/tests/*.py tests/
+          rm -rf /tmp/priv
+      - run: python3 -m tests.test_v4_locate >/dev/null && python3 -m tests.test_v4_modules >/dev/null && echo "self-tests pass"
+      - name: Run (output kept off the public log)
+        env: {INDRA_SITE: "${{ inputs.site }}"}
+        run: |
+          python3 -m indra.v4_run --out /tmp/v4 --only "${{ inputs.only }}" --extra "${{ inputs.extra }}" --workers "${{ inputs.workers }}" >/tmp/run.log 2>&1 || { echo "run failed; last lines:"; tail -5 /tmp/run.log | cut -c1-160; exit 1; }
+          echo "run ok; $(ls /tmp/v4 | wc -l) output files"
