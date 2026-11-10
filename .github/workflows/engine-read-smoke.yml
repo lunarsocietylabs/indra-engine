@@ -9,23 +9,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: oidc direct env
+      - name: oidc token + two requests
         run: |
-          echo "rt_len=${#ACTIONS_ID_TOKEN_REQUEST_TOKEN} ru_len=${#ACTIONS_ID_TOKEN_REQUEST_URL}"
+          set -u
           OIDC=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=lunarsocietylabs-model-keys" | jq -r .value)
-          echo "jwt_len=${#OIDC}"
-          MK=$(curl -s -X POST https://lunarsocietylabs.com/mcp/oidc/model-keys -H 'content-type: application/json' -d "{\"token\":\"$OIDC\"}")
-          echo "model_keys_ok=$(echo "$MK" | jq -r 'if .deepseek_api_key then "yes" else .error end')"
           ST=$(curl -s -X POST https://lunarsocietylabs.com/mcp/oidc/storage-token -H 'content-type: application/json' -d "{\"token\":\"$OIDC\"}")
-          echo "storage_token_agent=$(echo "$ST" | jq -r '.agent // .error')"
           TOK=$(echo "$ST" | jq -r '.token // empty')
-          echo "storage_token_len=${#TOK}"
-          if [ -n "$TOK" ]; then
-            echo "oidc-sync-probe" > p.txt
-            code=$(curl -s -o w.json -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOK" -H 'x-content-type: text/plain' --data-binary @p.txt \
-              https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/${{ github.repository }}/probe.txt)
-            echo "put_code_sync_http=$code"
-            code2=$(curl -s -o r.txt -w '%{http_code}' -H "Authorization: Bearer $TOK" \
-              https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/${{ github.repository }}/probe.txt)
-            echo "get_code_sync_http=$code2"
-          fi
+          echo "agent=$(echo "$ST" | jq -r .agent)"
+          echo "token_len=${#TOK}"
+          URL="https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/lunarsocietylabs/indra-engine/probe.txt"
+          echo "oidc-sync-probe-v2" > p.txt
+          B1=$(curl -s -X PUT -H "Authorization: Bearer $TOK" -H 'x-content-type: text/plain' --data-binary @p.txt "$URL")
+          echo "put_body=$(echo $B1 | head -c 160)"
+          sleep 2
+          B2=$(curl -s -H "Authorization: Bearer $TOK" "$URL")
+          echo "get_body=$(echo $B2 | head -c 160)"
+          B3=$(curl -s -X PUT -H "Authorization: Bearer $TOK" -H 'x-content-type: text/plain' --data-binary @p.txt "$URL")
+          echo "put2_body=$(echo $B3 | head -c 160)"
