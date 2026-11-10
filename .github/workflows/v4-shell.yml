@@ -1,13 +1,14 @@
 name: v4-shell
-# Manual only. Runs on free public-repo minutes; the private engine is fetched at run time and never printed.
+# Manual only. Free public-repo minutes; private engine fetched via OIDC from private storage and never printed.
 on:
   workflow_dispatch:
     inputs:
       site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
-      only: {description: "Families or extra ids; empty = all", default: "heart,amitabha"}
+      only: {description: "Families or extra ids; empty = all", default: "heart"}
       extra: {description: "Extra target(s) fam:ID:titlekeyword[,..]", default: ""}
       workers: {description: "Parallel workers", default: "4"}
 permissions:
+  id-token: write
   contents: read
 concurrency: {group: "v4-shell-${{ inputs.only }}-${{ inputs.extra }}", cancel-in-progress: true}
 jobs:
@@ -20,13 +21,12 @@ jobs:
         with: {python-version: '3.11'}
       - run: pip install --quiet --no-input numpy requests
       - name: Fetch private engine (quiet)
-        env: {T: "${{ secrets.ENGINE_READ_TOKEN }}"}
+        run: python3 .github/scripts/fetch_engine.py
+      - name: Overlay
         run: |
-          set +x
-          git -c http.extraheader="Authorization: Basic $(printf 'x-access-token:%s' "$T" | base64 -w0)" clone -q --depth 1 https://github.com/lunarsocietylabs/zelizuli.com.git /tmp/priv >/dev/null 2>&1 || { echo "clone failed (token lacks Contents: read?)"; exit 1; }
-          cp /tmp/priv/engine/v4/indra/*.py indra/
-          mkdir -p tests && touch tests/__init__.py && cp /tmp/priv/engine/v4/tests/*.py tests/
-          rm -rf /tmp/priv
+          find /tmp/eng_pkg -path '*indra/*.py' -exec cp {} indra/ \;
+          mkdir -p tests && touch tests/__init__.py && find /tmp/eng_pkg -path '*tests/*.py' -exec cp {} tests/ \;
+          rm -rf /tmp/eng_pkg
       - run: python3 -m tests.test_v4_locate >/dev/null && python3 -m tests.test_v4_modules >/dev/null && echo "self-tests pass"
       - name: Run (output kept off the public log)
         env: {INDRA_SITE: "${{ inputs.site }}"}
