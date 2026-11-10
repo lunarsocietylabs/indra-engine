@@ -8,6 +8,8 @@ on:
       only: {description: "Comma-separated target ids (empty = all)", default: ""}
       nshards: {description: "Shards", default: "8"}
       workers: {description: "Workers per shard", default: "2"}
+      plan_classes: {description: "Target classes for a new plan", default: "canon"}
+      unmatched_tag: {description: "Only match texts left unmatched in this earlier run", default: ""}
       out_tag: {description: "Output folder tag (default: plan tag / run id)", default: ""}
 permissions:
   id-token: write
@@ -27,7 +29,8 @@ jobs:
       - run: python3 .github/scripts/oidc_store.py engine
       - run: |
           find /tmp/eng_pkg -path '*indra/*.py' -exec cp {} indra/ \;
-          python3 -m indra.v4_plan --out /tmp/plan >/tmp/plan.log 2>&1 || { tail -3 /tmp/plan.log | cut -c1-160; exit 1; }
+          X=""; if [ -n "${{ inputs.unmatched_tag }}" ]; then python3 .github/scripts/oidc_store.py get engine-v4-out/${{ inputs.unmatched_tag }}/plan.json /tmp/prev.json; X="--unmatched-from /tmp/prev.json"; fi
+          python3 -m indra.v4_plan --out /tmp/plan --classes "${{ inputs.plan_classes }}" $X >/tmp/plan.log 2>&1 || { tail -3 /tmp/plan.log | cut -c1-160; exit 1; }
           python3 .github/scripts/oidc_store.py put /tmp/plan/plan.json engine-v4-out/${{ github.run_id }}/plan.json
           echo "plan ok: $(python3 -c 'import json;print(len(json.load(open("/tmp/plan/plan.json"))["families"]))') families"
   shards:
