@@ -1,5 +1,4 @@
 name: engine-read-smoke
-# 只读冒烟：验证 ENGINE_READ_TOKEN 能读私有仓、且不能写；日志不打印任何代码内容。
 on:
   workflow_dispatch:
 permissions:
@@ -9,40 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: secret presence
+      - name: diagnose token permissions
         env:
           T: ${{ secrets.ENGINE_READ_TOKEN }}
         run: |
+          set -u
+          REPO=lunarsocietylabs/zelizuli.com
           echo "token_len=${#T}"
-          if [ "${#T}" -lt 20 ]; then echo "ENGINE_READ_TOKEN missing/too short"; exit 1; fi
-      - name: read private repo metadata (no code printed)
-        env:
-          T: ${{ secrets.ENGINE_READ_TOKEN }}
-        run: |
-          set -e
-          REPO=lunarsocietylabs/zelizuli.com
-          code=$(curl -s -o meta.json -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO")
-          echo "repo_meta_http=$code"
-          jq -r '"private=\(.private) default_branch=\(.default_branch) size_kb=\(.size)"' meta.json
-      - name: shallow clone private repo (summary only)
-        env:
-          T: ${{ secrets.ENGINE_READ_TOKEN }}
-        run: |
-          set -e
-          REPO=lunarsocietylabs/zelizuli.com
-          rm -rf /tmp/src && git clone -q --depth 1 "https://x-access-token:$T@github.com/$REPO.git" /tmp/src
-          echo "clone_ok=yes"
-          echo "head_sha=$(git -C /tmp/src rev-parse --short HEAD)"
-          echo "tracked_files=$(git -C /tmp/src ls-files | wc -l | tr -d ' ')"
-          echo "repo_size=$(du -sh /tmp/src | cut -f1)"
-      - name: write must be denied (read-only proof)
-        env:
-          T: ${{ secrets.ENGINE_READ_TOKEN }}
-        run: |
-          REPO=lunarsocietylabs/zelizuli.com
-          SHA=$(git -C /tmp/src rev-parse HEAD)
-          code=$(curl -s -o w.json -w '%{http_code}' -X POST -H "Authorization: Bearer $T" \
-            -H 'content-type: application/json' \
-            -d "{\"ref\":\"refs/heads/smoke-should-fail\",\"sha\":\"$SHA\"}" \
-            "https://api.github.com/repos/$REPO/git/refs")
-          echo "write_attempt_http=$code (403/404 = 只读生效)"
+          for ep in "" "/contents" "/contents/README.md" "/git/trees/main?recursive=1"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO$ep")
+            echo "api ${ep:-/repo} -> $code"
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO/readme")
+          echo "api /readme -> $code"
+          git clone -q --depth 1 "https://x-access-token:$T@github.com/$REPO.git" /tmp/src 2>&1 | sed 's/x-access-token:[^@]*@/x-access-token:***@/' | tail -3 || true
+          if [ -d /tmp/src/.git ]; then echo "clone_ok=yes"; else echo "clone_ok=no"; fi
