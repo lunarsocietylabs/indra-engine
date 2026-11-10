@@ -9,23 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: token permissions
-        env:
-          T: ${{ secrets.ENGINE_READ_TOKEN }}
+      - name: oidc direct env
         run: |
-          REPO=lunarsocietylabs/zelizuli.com
-          echo "token_len=${#T}"
-          for ep in "" "/contents" "/contents/README.md"; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO$ep")
-            echo "api ${ep:-/repo} -> $code"
-          done
-      - name: oidc endpoints
-        env:
-          RT: ${{ secrets.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
-          RU: ${{ secrets.ACTIONS_ID_TOKEN_REQUEST_URL }}
-        run: |
-          echo "rt_len=${#RT} ru_len=${#RU}"
-          OIDC=$(curl -s -H "Authorization: bearer $RT" "$RU&audience=lunarsocietylabs-model-keys" | jq -r .value)
+          echo "rt_len=${#ACTIONS_ID_TOKEN_REQUEST_TOKEN} ru_len=${#ACTIONS_ID_TOKEN_REQUEST_URL}"
+          OIDC=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=lunarsocietylabs-model-keys" | jq -r .value)
           echo "jwt_len=${#OIDC}"
           MK=$(curl -s -X POST https://lunarsocietylabs.com/mcp/oidc/model-keys -H 'content-type: application/json' -d "{\"token\":\"$OIDC\"}")
           echo "model_keys_ok=$(echo "$MK" | jq -r 'if .deepseek_api_key then "yes" else .error end')"
@@ -38,4 +25,7 @@ jobs:
             code=$(curl -s -o w.json -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOK" -H 'x-content-type: text/plain' --data-binary @p.txt \
               https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/${{ github.repository }}/probe.txt)
             echo "put_code_sync_http=$code"
+            code2=$(curl -s -o r.txt -w '%{http_code}' -H "Authorization: Bearer $TOK" \
+              https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/${{ github.repository }}/probe.txt)
+            echo "get_code_sync_http=$code2"
           fi
