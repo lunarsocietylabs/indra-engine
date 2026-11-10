@@ -3,23 +3,39 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write
 jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: diagnose token permissions
+      - name: token permissions
         env:
           T: ${{ secrets.ENGINE_READ_TOKEN }}
         run: |
-          set -u
           REPO=lunarsocietylabs/zelizuli.com
           echo "token_len=${#T}"
-          for ep in "" "/contents" "/contents/README.md" "/git/trees/main?recursive=1"; do
+          for ep in "" "/contents" "/contents/README.md"; do
             code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO$ep")
             echo "api ${ep:-/repo} -> $code"
           done
-          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" "https://api.github.com/repos/$REPO/readme")
-          echo "api /readme -> $code"
-          git clone -q --depth 1 "https://x-access-token:$T@github.com/$REPO.git" /tmp/src 2>&1 | sed 's/x-access-token:[^@]*@/x-access-token:***@/' | tail -3 || true
-          if [ -d /tmp/src/.git ]; then echo "clone_ok=yes"; else echo "clone_ok=no"; fi
+      - name: oidc endpoints
+        env:
+          RT: ${{ secrets.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+          RU: ${{ secrets.ACTIONS_ID_TOKEN_REQUEST_URL }}
+        run: |
+          echo "rt_len=${#RT} ru_len=${#RU}"
+          OIDC=$(curl -s -H "Authorization: bearer $RT" "$RU&audience=lunarsocietylabs-model-keys" | jq -r .value)
+          echo "jwt_len=${#OIDC}"
+          MK=$(curl -s -X POST https://lunarsocietylabs.com/mcp/oidc/model-keys -H 'content-type: application/json' -d "{\"token\":\"$OIDC\"}")
+          echo "model_keys_ok=$(echo "$MK" | jq -r 'if .deepseek_api_key then "yes" else .error end')"
+          ST=$(curl -s -X POST https://lunarsocietylabs.com/mcp/oidc/storage-token -H 'content-type: application/json' -d "{\"token\":\"$OIDC\"}")
+          echo "storage_token_agent=$(echo "$ST" | jq -r '.agent // .error')"
+          TOK=$(echo "$ST" | jq -r '.token // empty')
+          echo "storage_token_len=${#TOK}"
+          if [ -n "$TOK" ]; then
+            echo "oidc-sync-probe" > p.txt
+            code=$(curl -s -o w.json -w '%{http_code}' -X PUT -H "Authorization: Bearer $TOK" -H 'x-content-type: text/plain' --data-binary @p.txt \
+              https://lunarsocietylabs.com/lst-private-docs/docs/code-sync/${{ github.repository }}/probe.txt)
+            echo "put_code_sync_http=$code"
+          fi
