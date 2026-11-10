@@ -21,8 +21,14 @@ jobs:
           p=sys.argv[1].split('.')[1]; p+='='*(-len(p)%4)
           c=json.loads(base64.urlsafe_b64decode(p)); print({k:c[k] for k in ('iss','aud','sub','repository','ref','job_workflow_ref') if k in c})
           P
-            for EP in model-keys storage-token; do
-              R=$(curl -s -m 20 -o /tmp/r.json -w '%{http_code}' -X POST -H "Authorization: Bearer $J" -H "Content-Type: application/json" -d '{}' "https://lunarsocietylabs.com/mcp/oidc/$EP")
-              echo "$EP -> $R msg: $(head -c 300 /tmp/r.json)"
+            for EP in storage-token; do
+              for K in jwt token id_token oidc_token oidc jwt_token; do
+                R=$(curl -s -m 20 -o /tmp/r.json -w '%{http_code}' -X POST -H "Content-Type: application/json" -d "{\"$K\":\"$J\"}" "https://lunarsocietylabs.com/mcp/oidc/$EP")
+                echo "$EP body-key=$K -> $R msg: $(head -c 200 /tmp/r.json | sed -E 's/[A-Za-z0-9_-]{40,}/<redacted>/g')"
+              done
+              R=$(curl -s -m 20 -o /tmp/r.json -w '%{http_code}' -X POST -H "X-OIDC-Token: $J" -d '{}' "https://lunarsocietylabs.com/mcp/oidc/$EP")
+              echo "$EP header X-OIDC-Token -> $R msg: $(head -c 200 /tmp/r.json | sed -E 's/[A-Za-z0-9_-]{40,}/<redacted>/g')"
+              R=$(curl -s -m 20 -o /tmp/r.json -w '%{http_code}' -X POST -H "Authorization: Bearer $J" "https://lunarsocietylabs.com/mcp/oidc/$EP")
+              echo "$EP bearer-nobody -> $R msg: $(head -c 200 /tmp/r.json | sed -E 's/[A-Za-z0-9_-]{40,}/<redacted>/g')"
             done
           done
