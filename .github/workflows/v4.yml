@@ -1,19 +1,23 @@
 name: v4
-# Manual only. Runs the v4 commentary engine on real sutras and their commentaries; summary goes to the Job Summary, JSON is kept as an artifact-free tarball in the log tail.
+# Manual only. Runs the v4 commentary engine on real sutras with their commentaries, plus the built-in exams
+# (other-family control, quoted-passage recall, relation precision/recall, v3 comparison). Report goes to the Job Summary.
 on:
   workflow_dispatch:
     inputs:
       site: {description: Corpus server base URL, required: true, default: "https://aicanon.omnisun.workers.dev"}
       only: {description: "Comma-separated families (heart,amitabha,diamond,vimalakirti,lotus); empty = all", default: "heart,amitabha"}
+      room: {description: "Seed floor room (default 200; smaller = more permissive)", default: "200"}
+      radius: {description: "Support radius in commentary characters (default 300)", default: "300"}
+concurrency: {group: "${{ github.workflow }}-${{ github.ref }}-${{ inputs.only }}-${{ inputs.room }}-${{ inputs.radius }}", cancel-in-progress: true}
 jobs:
   v4:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
       - run: pip install --quiet --no-input numpy requests
-      - run: for m in v4_grammar v4_kepan v4_layers v4_cite; do python3 -m indra.$m; done; python3 -m tests.test_v4_locate
-      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.v4_run --out /tmp/v4 --only "${{ inputs.only }}"
+      - run: python3 -m tests.test_v4_locate && python3 -m tests.test_v4_modules
+      - run: INDRA_SITE="${{ inputs.site }}" python3 -m indra.v4_run --out /tmp/v4 --only "${{ inputs.only }}" --room "${{ inputs.room }}" --radius "${{ inputs.radius }}" --workers 4
       - run: cat /tmp/v4/summary.md >> "$GITHUB_STEP_SUMMARY"
