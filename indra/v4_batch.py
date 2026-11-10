@@ -68,7 +68,7 @@ def main(a):
         t1 = time.time()
         try:
             target = get_doc(tid, "sutra:" + tid, meta)
-            own_ids = sorted(c["id"] for c in f["comms"] if c.get("primary"))
+            own_ids = sorted(c["id"] for c in f["comms"] if c.get("primary")) or sorted(c["id"] for c in f["comms"])
             if not target or not own_ids:
                 raise RuntimeError(("no target" if not target else "no primary") + f" t={bool(target)} n={len(own_ids)}")
             bad = {c["id"] for c in f["comms"]}
