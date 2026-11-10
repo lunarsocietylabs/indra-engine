@@ -13,7 +13,8 @@ from . import v4_locate as V
 
 
 def align(A, B, boundsA, boundsB, decoys, bg):
-    """返回 {pairs:[(a句, b句, 相同字数)], cover_A, cover_B, stats}。decoys 必须给（没有对照不出结果）。"""
+    """返回 {pairs:[(a句, b句, 相同字数)], cover_A, cover_B, stats}。decoys 必须给（没有对照不出结果）。
+    異譯之间相同的片段往往很长、处数很少；確层要求 假经数 × 锚点数 ≥ 100，所以短经请给足假经（16 部以上）。"""
     r = V.locate(A, B, boundsA, decoys, bg)
     sb = [b[0] for b in boundsB]
     share = collections.Counter()
@@ -21,10 +22,12 @@ def align(A, B, boundsA, boundsB, decoys, bg):
     for s in r["segs"]:
         if s["kind"] != "引" or s["tier"] != V.SURE:
             continue
-        ka = max(0, bisect.bisect_right(sa, s["s0"]) - 1)
-        kb = max(0, bisect.bisect_right(sb, s["c0"]) - 1)
-        share[(ka, kb)] += s["c1"] - s["c0"]
-    pairs = sorted((a, b, n) for (a, b), n in share.items())
+        for o in range(min(s["c1"] - s["c0"], s["s1"] - s["s0"])):     # 一处相同的长片段可以跨好几句：逐字记到各自的句对上
+            ka = max(0, bisect.bisect_right(sa, s["s0"] + o) - 1)
+            kb = max(0, bisect.bisect_right(sb, s["c0"] + o) - 1)
+            share[(ka, kb)] += 1
+    pairs = sorted((a, b, n) for (a, b), n in share.items()
+                   if n * 2 >= min(boundsA[a][1] - boundsA[a][0], boundsB[b][1] - boundsB[b][0]))   # 至少对上较短一句的一半
     return {"pairs": pairs, "cover_A": len({p[0] for p in pairs}) / max(1, len(boundsA)),
             "cover_B": len({p[1] for p in pairs}) / max(1, len(boundsB)), "stats": r["stats"]}
 

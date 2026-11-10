@@ -65,9 +65,34 @@ def test_isolated_quote():
     assert n >= 30 and wrong == 0, (n, wrong)
 
 
+def test_parallel():
+    """同本异译：六成句子沿用前译，其余重译。沿用的句子应一一对上，重译的不硬配。"""
+    from indra import v4_parallel as P
+    rnd = random.Random(9)
+    alpha = [chr(0x4E00 + k) for k in range(3000)]
+    def text(n):
+        return "".join(rnd.choice(alpha) for _ in range(n))
+    a_cls = [text(12) for _ in range(50)]
+    same = [rnd.random() < 0.6 for _ in a_cls]
+    b_cls = [c if keep else text(13) for c, keep in zip(a_cls, same)]
+    def pack(cls):
+        S, b = "", []
+        for c in cls:
+            b.append((len(S), len(S) + len(c))); S += c
+        return S, b
+    A, ba = pack(a_cls); B, bb = pack(b_cls)
+    r = P.align(A, B, ba, bb, [text(len(A)) for _ in range(16)], V.Background([text(200000)]))
+    got = {(a, b) for a, b, n in r["pairs"]}
+    want = {(k, k) for k, keep in enumerate(same) if keep}
+    print(f"parallel: 句对 {len(got & want)}/{len(want)}，多配 {len(got - want)}")
+    assert len(got & want) >= 0.95 * len(want) and not (got - want)
+    assert len(P.as_segs(r["pairs"], ba, bb)) == len(r["pairs"])
+
+
 if __name__ == "__main__":
     for m in ("v4_grammar", "v4_kepan", "v4_layers", "v4_cite"):
         runpy.run_module("indra." + m, run_name="__main__")
     test_refine()
     test_isolated_quote()
+    test_parallel()
     print("OK")
