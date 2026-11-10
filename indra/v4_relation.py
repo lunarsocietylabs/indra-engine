@@ -1,39 +1,35 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Lunar Society Technologies
 """
-v4_relation.py — 经疏关系从数据里来（共线性），替代"按书名猜"。
-对任意一对文献 (A, B) 做 locate，读出形状：
-  cover_A  B 的锚点覆盖了 A 的多少（A 被"走了一遍"的程度）；  cover_B  A 的锚点覆盖了 B 的多少；
-  order    主链上的锚点数 / 全部锚点数（越接近 1，顺序越一致）；  scale    |B| / |A|。
-典型形状：随文注疏——A 被按序走一遍以上（cover_A 高、order 高）且 B 远长于 A；同本异译——长度相近、有序、共有中等；
-抄集／类书——大块照搬但无序（order 低）；偶引——cover_A 低。
-下面的规则是**暂定的**：run 时用已知的真实例子（有大量「」明引的注疏）与无关文献一起测它的精确率，数字随结果一并公布，再冻结。
+v4_relation.py — 经疏关系从数据里来，替代"按书名猜"。
+
+对一对文献（A 当经、B 当疏）跑 v4_locate，只看**过了確层门槛**的锚点，读出形状（v4_locate.stats）：
+  clause_hit  A 的句子里，被 B 逐字牒到的比例；      order   確层引文里落在同一条顺序链上的比例；
+  scale       |B| / |A|；                            frac    B 的文字里確层归属到 A 的比例。
+判别（阈值是暂定的；v4_run 每次都拿"本族注疏 对 别族注疏"实测它的精确率与召回率，随结果公布，数字说话）：
+  注疏      B 按次序把 A 的相当一部分句子牒了出来，且 B 自己的文字多在讲 A；
+  異譯重出  与 A 长度相近、通篇顺序相同；
+  節引      牒到的句子不多但有序（节要、别行、悬谈）；
+  偶引      只零星引到；   無關  確层一处也没有。
 """
-from . import v4_locate as V
 
 
-def shape(A, B, min_score=8.0):
-    chs = V.chains(A, B, min_score=min_score)
-    if not chs:
-        return {"cover_A": 0.0, "cover_B": 0.0, "order": 0.0, "scale": len(B) / max(1, len(A)), "chains": 0, "top": 0.0}
-    covA, covB = bytearray(len(A)), bytearray(len(B))
-    total = sum(len(c["seeds"]) for c in chs)
-    for c in chs:
-        for i, j, L, _ in c["seeds"]:
-            covA[j:j + L] = b"\x01" * L
-            covB[i:i + L] = b"\x01" * L
-    return {"cover_A": sum(covA) / len(A), "cover_B": sum(covB) / len(B), "order": len(chs[0]["seeds"]) / total,
-            "scale": len(B) / len(A), "chains": len(chs), "top": chs[0]["score"]}
-
-
-def classify(sh):
-    if sh["chains"] == 0 or sh["cover_A"] < 0.05:
+def classify(st):
+    if not st.get("anchors_sure"):
         return "無關"
-    if sh["cover_A"] >= 0.5 and sh["order"] >= 0.6:
-        if sh["scale"] >= 1.5:
-            return "注疏"
-        if 0.5 <= sh["scale"] < 1.5 and sh["cover_B"] >= 0.5:
-            return "異譯或重出"
-    if sh["order"] < 0.4 and sh["cover_A"] >= 0.2:
-        return "抄集類書"
+    hit = st["clauses_hit"] / max(1, st["clauses"])
+    if hit >= 0.6 and st["order"] >= 0.7 and 0.5 <= st["scale"] <= 2.0 and st["cover_S"] >= 0.5:
+        return "異譯重出"
+    if hit >= 0.3 and st["order"] >= 0.5 and st["frac_sure"] >= 0.2:
+        return "注疏"
+    if hit >= 0.1 and st["order"] >= 0.5:
+        return "節引"
     return "偶引"
+
+
+def confusion(own, other):
+    """own: 本族注疏的类别列表；other: 别族注疏（对照）的类别列表。返回"判为注疏"的精确率、召回率与各类计数。"""
+    tp = sum(1 for c in own if c == "注疏")
+    fp = sum(1 for c in other if c == "注疏")
+    return {"precision": tp / (tp + fp) if tp + fp else None, "recall": tp / len(own) if own else None,
+            "own": {c: own.count(c) for c in sorted(set(own))}, "other": {c: other.count(c) for c in sorted(set(other))}}

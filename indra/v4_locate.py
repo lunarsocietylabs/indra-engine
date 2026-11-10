@@ -1,136 +1,572 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Lunar Society Technologies
 """
-v4_locate.py — 注经引擎 v4 · 全文定位（确定性、零模型、每一步可解释）
+v4_locate.py — 注经引擎 v4 · 全文定位（确定性、零模型、每一步可解释、错误率可测）
 
-v3 回答"疏文里哪几个字是引的经"。v4 回答"这一整段疏文在讲哪一句经"：把整部注疏比对到经文坐标上，
-没有引一个字的义理段落也有归属。思路借自基因组比对（minimap2 的 种子—成链），再加上读段比对里的"假经对照"估计错误率。
+v3 回答"疏文里哪几个字是引的经"。v4 回答"这一整段疏文在讲哪一句经"：把整部注疏比对到经文坐标上。
 
-  1. 种子   疏文与经文之间全部逐字相同、左右都不能再延伸的片段（≥2 字）。
-  2. 权重   每个种子的信息量 = (长度-1) × log(1 + 经长 / 该种子首个二字组在经中的出现次数)；"如是我聞"类高频片段几乎不值分。
-  3. 成链   在全部种子里求一条总得分最大、疏文顺序 = 经文顺序的链（动态规划，间隙有罚分）。
-           注家常把一部经走两遍（悬谈、正释）：取最优链后，把用过的疏文部分剔除，再取下一条链，直到得分低于门槛。
-  4. 归属   链上相邻两个锚点之间的疏文（没有引经字的部分）归属于对应的那段经文：疏文接在某句牒文之后，就是在讲那一句。
-  5. 门槛   用同样长度的"假经"（与该疏无关的别部文献的窗口）做同样的比对，得到链得分的零分布；
-           据此估计任一得分门槛下的假发现率（FDR），确定层与候选层用 FDR 定义，而不是手调的阈值。
+  1. 种子   疏文与经文之间逐字相同、左右都不能再延伸的片段。短经用二字起，长经用三、四字起（见 kmer_for）。
+           不因"高频"跳过任何位置——跳过会让以常见词开头的整段引文丢失。
+  2. 信息量 每个种子值多少，由**背景语言模型**决定：这几个字在一般佛典里连着出现有多稀罕（二字组条件概率，单位 nat）。
+           "般若波羅蜜多"到处都是，几乎不值分；一句只在本经出现的话，值很多分。
+  3. 成链   动态规划求得分最大的链。得分 = 信息量之和 − 位置自由度的代价：
+             链的起点付 ln|经长|（它可以落在经里任何地方）；之后每一步付 ln(1+经文跨度)（它只能落在前一锚点之后的窗口里）；
+             释文再长也只付很小的对数代价（一句经可以讲几千字）；允许在当前句附近小幅回引（注家讲一句时会反复提这句里的词）。
+           于是链得分近似"这是真引文 相对 碰巧相同"的对数几率，不是手调的权重。
+  4. 补认   链上相邻两个锚点之间，再在**那一小段经文窗口**里找二字以上的短牒文（"言空者""色者"）。窗口小，所以短也有据。
+  5. 异文   同一斜线上只隔一两个字的两个锚点并成一处引文，记下差了几个字（异体、通假、脱衍），不当作两处。
+  6. 门槛   同一部疏、同样的流程，去比对若干部同样长度的"假经"（无关文献的窗口）。每个锚点有"局部支持度"
+           （它周围一段疏文里链的净得分）。真经与假经的支持度分布一比，就得到任一门槛下的假发现率（FDR）。
+           確层 = FDR≤1%，候层 = FDR≤10%，其余不出。门槛由数据定，不由人定。
+  7. 归属   只用过了门槛的锚点。两个锚点之间的释文：
+             前后锚点在同一句或紧邻两句 → 归前一句（先牒后释），层级取两端较低者；
+             中间跳过了若干句 → 归"前一句至后一句之前"这个区间，降为候层（除非略牒文法另有明文，见 v4_grammar）；
+             后一锚点由"故云／故曰"引出（结引）→ 区间含后一句，候层。
+           离锚点太远的释文降层或不出（reach）。不在主链上的零星引文记为「參」（参见别处经文），不带释文。
 
 接口只依赖字符串（已 norm 的字符流），无网络、无随机；同输入必得同输出。
 """
 import bisect, collections, math
 
+import numpy as np
+
+TAIL_MARKS = ("故云", "故曰", "故言", "故說", "故名", "故經云", "是故云")
+SURE, CAND = "確", "候"
+
+
+# ---------------------------------------------------------------- 背景语言模型
+class Background:
+    """二字组条件概率（回退到单字），由一批"一般佛典"文本统计。info(s) = −ln P(s)，单位 nat。"""
+
+    def __init__(self, texts, mu=4.0, cap=12.0):
+        self.uni, self.bi = collections.Counter(), collections.Counter()
+        for t in texts:
+            self.uni.update(t)
+            self.bi.update(t[k:k + 2] for k in range(len(t) - 1))
+        self.N = sum(self.uni.values()) or 1
+        self.V = len(self.uni) + 1
+        self.mu, self.cap, self._memo = mu, cap, {}
+
+    def info(self, s):
+        v = self._memo.get(s)
+        if v is not None:
+            return v
+        uni, bi, N, V, mu, cap = self.uni, self.bi, self.N, self.V, self.mu, self.cap
+        a = s[0]
+        h = min(cap, -math.log((uni[a] + 1) / (N + V)))
+        for b in s[1:]:
+            pb = (uni[b] + 1) / (N + V)
+            h += min(cap, -math.log((bi[a + b] + mu * pb) / (uni[a] + mu)))
+            a = b
+        if len(self._memo) < 2_000_000:
+            self._memo[s] = h
+        return h
+
+
 # ---------------------------------------------------------------- 种子
-def seeds(S, C, kmin=2, max_occ=300):
-    """S（经）与 C（疏）之间所有极大公共子串 (ci, sj, L)；L>=kmin。二字组在经中出现 > max_occ 次的位置跳过。"""
+def kmer_for(lenS):
+    return 2 if lenS <= 3000 else 3 if lenS <= 30000 else 4
+
+
+def seeds(S, C, k=None):
+    """S（经）与 C（疏）之间全部长度 ≥k 的极大公共子串 [(i, j, L)]。"""
+    k = k or kmer_for(len(S))
     idx = collections.defaultdict(list)
-    for j in range(len(S) - kmin + 1):
-        idx[S[j:j + kmin]].append(j)
-    out = []
-    n, m = len(C), len(S)
-    for i in range(n - kmin + 1):
-        js = idx.get(C[i:i + kmin])
-        if not js or len(js) > max_occ:
+    for j in range(len(S) - k + 1):
+        idx[S[j:j + k]].append(j)
+    out, n, m = [], len(C), len(S)
+    get = idx.get
+    for i in range(n - k + 1):
+        js = get(C[i:i + k])
+        if not js:
             continue
+        left = C[i - 1] if i else None
         for j in js:
-            if i > 0 and j > 0 and C[i - 1] == S[j - 1]:
+            if j and left == S[j - 1]:
                 continue                                   # 左边还能延伸：不是极大
-            L = kmin
+            L = k
             while i + L < n and j + L < m and C[i + L] == S[j + L]:
                 L += 1
-            out.append((i, j, L, len(js)))
+            out.append((i, j, L))
     return out
 
-
-def weigh(sd, lenS):
-    """(i, j, L, occ2) -> (i, j, L, w)"""
-    return [(i, j, L, (L - 1) * math.log(1.0 + lenS / occ)) for i, j, L, occ in sd]
 
 # ---------------------------------------------------------------- 成链
-def best_chain(sd, gap_c=900, gap_s=600, look=300, a=0.02, b=0.6):
-    """sd: [(i,j,L,w)]。返回 (得分, [种子下标…])。i 递增、j 不后退；间隙罚分 a*疏文间隙 + b*log(1+经文间隙)。"""
-    order = sorted(range(len(sd)), key=lambda k: (sd[k][0], sd[k][1]))
-    f = {}; prev = {}
-    seq = []
-    for k in order:
-        i, j, L, w = sd[k]
-        best, bp = w, -1
-        for p in reversed(seq[-look:]):
-            ip, jp, Lp, _ = sd[p]
-            if ip + Lp > i or j < jp + Lp - 2:
-                continue
-            gc, gs = i - (ip + Lp), max(0, j - (jp + Lp))
-            if gc > gap_c or gs > gap_s:
-                continue
-            v = f[p] + w - a * gc - b * math.log1p(gs)
-            if v > best:
-                best, bp = v, p
-        f[k], prev[k] = best, bp
-        seq.append(k)
-    if not f:
-        return 0.0, []
-    end = max(f, key=lambda k: (f[k], -k))
-    path = []
-    while end != -1:
-        path.append(end); end = prev[end]
-    return f[path[0]], path[::-1]
+class _Fenwick:
+    """前缀最大值（值, 下标）。"""
+
+    def __init__(self, n):
+        self.n = n + 1
+        self.v = [-1e18] * (self.n + 1)
+        self.a = [-1] * (self.n + 1)
+
+    def put(self, pos, val, arg):
+        p = pos + 1
+        while p <= self.n:
+            if val > self.v[p]:
+                self.v[p], self.a[p] = val, arg
+            p += p & -p
+
+    def best(self, pos):
+        p, bv, ba = min(pos, self.n - 1) + 1, -1e18, -1
+        while p > 0:
+            if self.v[p] > bv:
+                bv, ba = self.v[p], self.a[p]
+            p -= p & -p
+        return bv, ba
 
 
-def chains(S, C, min_score=8.0, max_chains=12, **kw):
-    """反复取最优链；用过的疏文区间剔除后再取。返回 [{score, seeds:[(i,j,L,w)]}…]，按得分降序。"""
-    sd = weigh(seeds(S, C), len(S))
+def _pen(gs, gc, Lp, back, beta, cgap):
+    """从前一锚点（经止点之后 gs 字、疏文隔 gc 字）走到这一锚点的代价；不允许则返回 None。"""
+    if gs >= 0:
+        p = math.log1p(gs)
+    elif -gs <= back + Lp:
+        p = beta + math.log1p(-gs)
+    else:
+        return None
+    return p + cgap * math.log1p(gc)
+
+
+def chain(sd, W, lenS, lenC, look=160, back=24, beta=1.0, cgap=1.0, tau=2.0, min_score=4.0, max_chains=64):
+    """sd: [(i,j,L)]，W: 各种子信息量。一次动态规划，再从高分终点回溯出互不重叠（疏文上）的若干条链。
+    返回 [{score, anchors:[[i,j,L,w,net]…]}]，按得分降序；net = 该锚点信息量 − 走到它的代价。"""
+    n = len(sd)
+    if not n:
+        return []
+    order = sorted(range(n), key=lambda q: (sd[q][0], sd[q][1], sd[q][2]))
+    I = np.array([sd[q][0] for q in order], dtype=np.int64)
+    J = np.array([sd[q][1] for q in order], dtype=np.int64)
+    L = np.array([sd[q][2] for q in order], dtype=np.int64)
+    Wt = np.array([W[q] for q in order], dtype=np.float64)
+    IE, JE = I + L, J + L
+    F = np.zeros(n); P = np.full(n, -1, dtype=np.int64)
+    START = math.log(1 + lenS) + tau
+    FAR = math.log(1 + lenS) + cgap * math.log1p(lenC) + tau        # 远距离衔接：按最坏情况付费（只会低估得分）
+    fen = _Fenwick(lenS + 2)
+    by_end = np.argsort(IE, kind="stable")
+    ptr = 0
+    for q in range(n):
+        i, j = int(I[q]), int(J[q])
+        while ptr < n and IE[by_end[ptr]] <= i:
+            e = int(by_end[ptr]); ptr += 1
+            if e < q:
+                fen.put(int(JE[e]), float(F[e]), e)
+        best, bp = -START, -1
+        lo = max(0, q - look)
+        if q > lo:
+            ie, je = IE[lo:q], JE[lo:q]
+            gs = j - je
+            ok = ie <= i
+            fwd = gs >= 0
+            ok &= fwd | (-gs <= back + L[lo:q])
+            pen = np.where(fwd, np.log1p(np.abs(gs)), beta + np.log1p(np.abs(gs))) + cgap * np.log1p(np.maximum(i - ie, 0))
+            v = np.where(ok, F[lo:q] - pen - tau, -1e18)
+            a = int(np.argmax(v))
+            if v[a] > best:
+                best, bp = float(v[a]), lo + a
+        fv, fa = fen.best(j)
+        if fa >= 0 and fv - FAR > best:
+            best, bp = fv - FAR, fa
+        F[q] = Wt[q] + best
+        P[q] = bp
+    ends = sorted(range(n), key=lambda q: (-F[q], q))
+    used = np.zeros(n, dtype=bool)
+    usedC = bytearray(lenC + 1)
     out = []
-    while sd and len(out) < max_chains:
-        score, path = best_chain(sd, **kw)
-        if score < min_score or not path:
+    for e in ends:
+        if len(out) >= max_chains or F[e] < min_score:
             break
-        used = [sd[k] for k in path]
-        out.append({"score": score, "seeds": used})
-        cov = [(s[0], s[0] + s[2]) for s in used]
-        cov.sort()
-        def hit(s):
-            i0, i1 = s[0], s[0] + s[2]
-            p = bisect.bisect_right(cov, (i0, 1 << 60)) - 1
-            for q in (p, p + 1):
-                if 0 <= q < len(cov) and cov[q][0] < i1 and i0 < cov[q][1]:
-                    return True
-            return False
-        sd = [s for s in sd if not hit(s)]
+        if used[e]:
+            continue
+        path, q = [], e
+        while q != -1 and not used[q]:
+            path.append(q); q = int(P[q])
+        path.reverse()
+        for q in path:
+            used[q] = True
+        keep = [q for q in path if not any(usedC[int(I[q]):int(IE[q])])]
+        if not keep:
+            continue
+        anchors, score, prev = [], 0.0, None
+        for q in keep:
+            if prev is None:
+                pen = START
+            else:
+                pen = _pen(int(J[q] - JE[prev]), int(I[q] - IE[prev]), int(L[prev]), back, beta, cgap)
+                pen = FAR if pen is None else min(pen + tau, FAR)
+            net = float(Wt[q]) - pen
+            anchors.append([int(I[q]), int(J[q]), int(L[q]), float(Wt[q]), net])
+            score += net; prev = q
+        if score < min_score:
+            continue
+        for a in anchors:
+            usedC[a[0]:a[0] + a[2]] = b"\x01" * a[2]
+        out.append({"score": score, "anchors": anchors})
+    out.sort(key=lambda c: (-c["score"], c["anchors"][0][0]))
     return out
 
-# ---------------------------------------------------------------- 归属
-def attribute(chs, lenC, min_score=0.0):
-    """把疏文每个字归属到经文区间。返回 (段落列表, 归属字数)。
-    段落 = {c0,c1,s0,s1,kind,chain}；kind='引'（疏文里的逐字引文，对应经文就是那几个字）
-    或 '釋'（两个锚点之间、没有引经字的疏文，归属于前一锚点起到后一锚点止的经文）。"""
-    owner = bytearray(lenC)
-    segs = []
-    for ci, ch in sorted(enumerate(chs), key=lambda t: -t[1]["score"]):
-        if ch["score"] < min_score:
+
+# ---------------------------------------------------------------- 补认短牒文
+GLOSS_AFTER, GLOSS_BEFORE = "者", "言云曰謂名"
+
+
+def _local(win, C, g0, g1, bg, bonus=4.0):
+    """疏文 C[g0:g1] 对一小段经文窗口 win 的全部 ≥2 字极大相同片段，及其净得分。
+    净得分 = 信息量（＋"X者／言X"句式加分：这种句式把牒文的位置钉住了）− ln(窗口长) − ½ln(间隙长)。"""
+    cost = math.log(1 + len(win)) + 0.5 * math.log(1 + g1 - g0)
+    idx = collections.defaultdict(list)
+    for j in range(len(win) - 1):
+        idx[win[j:j + 2]].append(j)
+    out = []
+    for i in range(g0, g1 - 1):
+        js = idx.get(C[i:i + 2])
+        if not js:
             continue
-        ss = sorted(ch["seeds"])
-        for q, (i, j, L, _) in enumerate(ss):
-            if not any(owner[i:i + L]):
-                owner[i:i + L] = b"\x01" * L
-                segs.append({"c0": i, "c1": i + L, "s0": j, "s1": j + L, "kind": "引", "chain": ci})
-            if q + 1 < len(ss):
-                i2, j2 = ss[q + 1][0], ss[q + 1][1]
-                g0, g1 = i + L, i2
-                if g1 > g0:
-                    s1 = j2 if j2 > j else j + L
+        for j in js:
+            if i > g0 and j and C[i - 1] == win[j - 1]:
+                continue
+            Ln = 2
+            while i + Ln < g1 and j + Ln < len(win) and C[i + Ln] == win[j + Ln]:
+                Ln += 1
+            w = bg.info(C[i:i + Ln])
+            mark = (C[i + Ln:i + Ln + 1] == GLOSS_AFTER) or (i > 0 and C[i - 1] in GLOSS_BEFORE)
+            out.append((w + (bonus if mark else 0.0) - cost, i, j, Ln, w))
+    return out
+
+
+def refine(S, C, chs, bg, decoys=(), back=24, win_cap=400, targets=(0.01, 0.10)):
+    """在每条链相邻锚点之间的疏文里，只对着那一小段经文窗口找 ≥2 字的短牒文（"言空者""色者"）。
+    同一段疏文同时去比各部假经里同样大小的窗口，得到短牒文净得分的零分布；只留 FDR≤10% 的，≤1% 的另记。
+    没有假经则不补认。就地加入锚点（weak=1 候 / 2 確），返回加入数。"""
+    if not decoys:
+        return 0
+    jobs, true_nets, decoy_nets = [], [], [[] for _ in decoys]
+    for ci, ch in enumerate(chs):
+        A = sorted(_pad(a) for a in ch["anchors"])
+        for x, y in zip(A, A[1:]):
+            g0, g1 = x[0] + x[2], y[0]
+            if g1 - g0 < 2:
+                continue
+            g1 = min(g1, g0 + 4000)
+            w0 = max(0, min(x[1], y[1]) - back)
+            w1 = min(len(S), max(x[1] + x[7], y[1] + y[7]) + back)
+            if w1 - w0 > win_cap:
+                w1 = min(len(S), max(x[1] + x[7] + back, w0 + win_cap))
+            cand = _local(S[w0:w1], C, g0, g1, bg)
+            for c in cand:
+                true_nets.append(c[0])
+            jobs.append((ci, w0, cand))
+            for d, D in enumerate(decoys):
+                if len(D) >= w1 - w0:
+                    off = min(w0, len(D) - (w1 - w0))
+                    decoy_nets[d].extend(c[0] for c in _local(D[off:off + w1 - w0], C, g0, g1, bg))
+    th = thresholds(true_nets, decoy_nets, targets)
+    lo, hi = th.get(targets[1]), th.get(targets[0])
+    if lo is None:
+        return 0
+    added = 0
+    new = collections.defaultdict(list)
+    for ci, w0, cand in jobs:
+        taken = {}
+        for net, i, j, Ln, w in sorted(cand, key=lambda c: (-c[0], c[1], c[2])):
+            if net < lo:
+                break
+            if any((i + z) in taken for z in range(Ln)):
+                continue
+            for z in range(Ln):
+                taken[i + z] = 1
+            new[ci].append([i, w0 + j, Ln, w, net, 2 if (hi is not None and net >= hi) else 1, 0, Ln])
+            added += 1
+    for ci, lst in new.items():
+        chs[ci]["anchors"] = sorted([_pad(a) for a in chs[ci]["anchors"]] + lst)
+    return added
+
+
+def _pad(a):
+    a = list(a)
+    if len(a) < 6:
+        a += [0] * (6 - len(a))
+    if len(a) < 7:
+        a.append(0)
+    if len(a) < 8:
+        a.append(a[2])
+    return a                                                 # [i, j, L, w, net, weak, var, Ls]
+
+
+def merge_near(chs, tol=2):
+    """同一链上疏文、经文都只隔 ≤tol 字的相邻锚点并为一处引文；记异文字数。返回合并次数。"""
+    n = 0
+    for ch in chs:
+        out = []
+        for a in sorted(_pad(a) for a in ch["anchors"]):
+            if out:
+                p = out[-1]
+                gc, gs = a[0] - (p[0] + p[2]), a[1] - (p[1] + p[7])
+                if 0 <= gc <= tol and 0 <= gs <= tol and (gc or gs) and not (p[5] or a[5]):
+                    out[-1] = [p[0], p[1], a[0] + a[2] - p[0], p[3] + a[3], p[4] + a[4], 0, p[6] + max(gc, gs),
+                               a[1] + a[7] - p[1]]
+                    n += 1
+                    continue
+            out.append(a)
+        ch["anchors"] = out
+    return n
+
+
+def support(chs, R=300):
+    """每个（非补认）锚点的局部支持度：同一条链上、疏文距离 ≤R 的非补认锚点净得分之和。
+    补认的短牒文取它所在位置的同一数值，但不计入返回的列表（零分布只比主锚点）。
+    同时把锚点统一成字典：{i, j, L, Ls, w, net, weak, var, sup}。"""
+    allv = []
+    for ch in chs:
+        A = []
+        for a in ch["anchors"]:
+            if not isinstance(a, dict):
+                a = _pad(a)
+                a = {"i": a[0], "j": a[1], "L": a[2], "Ls": a[7], "w": a[3], "net": a[4], "weak": a[5], "var": a[6]}
+            A.append(a)
+        A.sort(key=lambda a: (a["i"], a["j"]))
+        M = [a for a in A if not a["weak"]]
+        pos = [a["i"] for a in M]
+        pre = [0.0]
+        for a in M:
+            pre.append(pre[-1] + a["net"])
+        for a in A:
+            lo = bisect.bisect_left(pos, a["i"] - R)
+            hi = bisect.bisect_right(pos, a["i"] + R)
+            a["sup"] = pre[hi] - pre[lo]
+            if not a["weak"]:
+                allv.append(a["sup"])
+        ch["anchors"] = A
+    return allv
+
+
+ROOM = 200
+
+
+def seed_floor(lenS, room=None, margin=2.0):
+    """主锚点的最低信息量：在经里任选位置（ln|经|）、在疏文两百字内任选位置（ln 200），仍比碰巧高出 margin。"""
+    return math.log(1 + lenS) + math.log(room or ROOM) + margin
+
+
+def join_diagonal(sd, W, tol=2):
+    """同一斜线上（疏、经错位相同）只隔 ≤tol 字的种子并成一个：中间那一两个字是异文（异体、通假、讹字）。
+    并后的信息量是各段之和（异文那几个字不算）。返回 ([(i,j,L)], [w], [异文字数])。"""
+    order = sorted(range(len(sd)), key=lambda q: (sd[q][0] - sd[q][1], sd[q][0]))
+    out, Wo, Vo = [], [], []
+    for q in order:
+        i, j, L = sd[q]
+        if out:
+            pi, pj, pL = out[-1]
+            gap = i - (pi + pL)
+            if pi - pj == i - j and 0 < gap <= tol:
+                out[-1] = (pi, pj, i + L - pi); Wo[-1] += W[q]; Vo[-1] += gap
+                continue
+        out.append((i, j, L)); Wo.append(W[q]); Vo.append(0)
+    return out, Wo, Vo
+
+
+def pipeline(S, C, bg, decoys=(), **kw):
+    """种子 → 信息量 → 并异文 → 成链 → 补认 → 支持度。给了 decoys 才做补认（假经自己走流程时不给）。"""
+    sd = seeds(S, C)
+    W = [bg.info(C[i:i + L]) for i, j, L in sd]
+    sd, W, var = join_diagonal(sd, W)
+    floor = seed_floor(len(S))
+    keep = [q for q in range(len(sd)) if W[q] >= floor]
+    vmap = {sd[q]: var[q] for q in keep if var[q]}
+    chs = chain([sd[q] for q in keep], [W[q] for q in keep], len(S), len(C), **kw)
+    for ch in chs:
+        ch["anchors"] = [_pad(a) for a in ch["anchors"]]
+        for a in ch["anchors"]:
+            a[6] = vmap.get((a[0], a[1], a[2]), 0)
+    merge_near(chs)
+    refine(S, C, chs, bg, decoys)
+    sup = support(chs)
+    return chs, sup
+
+
+# ---------------------------------------------------------------- 假经门槛
+def thresholds(true_sup, decoy_sups, targets=(0.01, 0.10)):
+    """true_sup: 真经上各锚点支持度；decoy_sups: 每部假经上的支持度列表。
+    门槛 t 处估计 FDR = (假经上 ≥t 的锚点总数 + 1) / (假经部数 × 真经上 ≥t 的锚点数)；取"单调化"后的 q 值。
+    返回 {target: 满足 q≤target 的最低门槛；没有则 None}。没有假经时返回 None（调用方不得出確层）。"""
+    D = len(decoy_sups)
+    if not D or not true_sup:
+        return {t: None for t in targets}
+    tv = sorted(true_sup, reverse=True)
+    dv = sorted((x for d in decoy_sups for x in d), reverse=True)
+    res, r, k = {t: None for t in targets}, 0, 0
+    for t in sorted(set(tv) | set(dv) | {0.0}, reverse=True):   # 门槛由高到低；越低越宽
+        while r < len(tv) and tv[r] >= t:
+            r += 1
+        while k < len(dv) and dv[k] >= t:
+            k += 1
+        if not r:
+            continue
+        fdr = (k + 1) / (D * r)
+        for tg in targets:
+            if fdr <= tg:
+                res[tg] = t                                  # 记下满足目标的最宽门槛
+    return res
+
+
+def tier_of(sup, th):
+    a, b = th.get(0.01), th.get(0.10)
+    if sup <= 0:
+        return None
+    if a is not None and sup >= a:
+        return SURE
+    if b is not None and sup >= b:
+        return CAND
+    return None
+
+
+# ---------------------------------------------------------------- 归属
+def pseudo_bounds(lenS, step=8):
+    return [(x, min(lenS, x + step)) for x in range(0, lenS, step)]
+
+
+def _low(t1, t2):
+    return SURE if t1 == SURE and t2 == SURE else CAND
+
+
+def _sequential(pts, near):
+    """pts: [(疏文位置, 句号)]（已按疏文位置排序）。返回其中"有次第"的点：疏文 near 字之内另有一处確层引文，落在相邻或隔一句的经文上。
+    逐句讲经的地方必然如此；别的文献里偶然引到本经一句，则不然——后者只算引文，不带释文。"""
+    ok = set()
+    lo = 0
+    for k, (i, c) in enumerate(pts):
+        while pts[lo][0] < i - near:
+            lo += 1
+        z = lo
+        while z < len(pts) and pts[z][0] <= i + near:
+            if z != k and 1 <= abs(pts[z][1] - c) <= 2:
+                ok.add((i, c)); break
+            z += 1
+    return ok
+
+
+def attribute(chs, C, bounds, th, para_starts=None, reach=2000, reach_max=8000, tail_reach=300, near=3000):
+    """返回 (segs, 字数统计)。seg = {c0,c1,s0,s1,kind,tier,chain[,var,weak,sup]}；kind ∈ 引／釋／參。"""
+    lenC = len(C)
+    starts = [b[0] for b in bounds]
+
+    def cl(j):
+        return max(0, min(len(bounds) - 1, bisect.bisect_right(starts, j) - 1))
+
+    para_starts = para_starts or []
+    quote = bytearray(lenC + 1)                               # 已作为引文的字
+    gap_owner = np.zeros(lenC + 1, dtype=np.int32)            # 释文归哪条链（链号+1）
+    segs, tiered = [], []
+    for ci, ch in enumerate(chs):
+        T = []
+        for a in ch["anchors"]:
+            t = tier_of(a["sup"], th)
+            if t and a["weak"] == 1:
+                t = CAND
+            if t and not any(quote[a["i"]:a["i"] + a["L"]]):
+                quote[a["i"]:a["i"] + a["L"]] = b"\x01" * a["L"]
+                T.append((a, t))
+        tiered.append(T)
+    for ci, T in enumerate(tiered):
+        def claim(g0, g1, s0, s1, tier, amb=0):
+            run = None
+            for x in range(g0, g1 + 1):
+                free = x < g1 and not quote[x] and not gap_owner[x]
+                if free and run is None:
+                    run = x
+                if not free and run is not None:
+                    far = run - g0
+                    tt = tier if far < reach else CAND
+                    gap_owner[run:x] = ci + 1
+                    sg = {"c0": run, "c1": x, "s0": s0, "s1": s1, "kind": "釋", "tier": tt, "chain": ci}
+                    if amb:
+                        sg["amb"] = 1
+                    segs.append(sg)
                     run = None
-                    for x in range(g0, g1 + 1):                     # 只认领尚未归属的连续片段
-                        free = x < g1 and not owner[x]
-                        if free and run is None:
-                            run = x
-                        if (not free) and run is not None:
-                            owner[run:x] = b"\x01" * (x - run)
-                            segs.append({"c0": run, "c1": x, "s0": j, "s1": s1, "kind": "釋", "chain": ci})
-                            run = None
+        cur, amb_hi = None, -1                                 # 当前所讲的经句（只由確层锚点确立）；其后候层锚点指到的最远句
+        led = _sequential([(a["i"], cl(a["j"])) for a, t in T if t == SURE], near)
+        for q, (a, t) in enumerate(T):
+            ka, ke = cl(a["j"]), cl(a["j"] + a["Ls"] - 1)
+            if t == SURE and (a["i"], ka) not in led:
+                t = CAND                                       # 孤立的一处引文（"如某經云…"）：是引文，不是在逐句讲这部经
+            if t == SURE and not (cur is not None and a["weak"] and ka < cur[0]):
+                cur, amb_hi = (ka, ke), -1                     # 短牒文往回指：不改变"当前句"
+            elif cur is not None and ke > cur[1]:
+                amb_hi = max(amb_hi, ke)
+            if cur is None:
+                continue                                       # 还没有確层锚点：释文不归属
+            g0 = a["i"] + a["L"]
+            if q + 1 < len(T):
+                b, tb = T[q + 1]
+                g1 = min(b["i"], g0 + reach_max)
+                if g1 <= g0:
+                    continue
+                kb = cl(b["j"])
+                tail = any(C[max(0, b["i"] - 4):b["i"]].endswith(m) for m in TAIL_MARKS)
+                if amb_hi > cur[1]:
+                    claim(g0, g1, bounds[cur[0]][0], bounds[amb_hi][1], CAND, amb=1)
+                elif b["weak"] and kb < cur[0]:
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE)
+                elif cur[0] <= kb <= cur[1] + 1 and not (tail and kb > cur[1]):
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], _low(SURE, tb))
+                elif kb > cur[1]:
+                    hi = kb if tail else kb - 1
+                    claim(g0, g1, bounds[cur[0]][0], bounds[hi][1], CAND, amb=1)
+                else:
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], CAND)
+            else:
+                end = min(lenC, g0 + tail_reach)
+                if para_starts:
+                    p = bisect.bisect_right(para_starts, g0)
+                    end = min(lenC, para_starts[p] if p < len(para_starts) else lenC, g0 + reach)
+                hi = max(cur[1], amb_hi)
+                claim(g0, end, bounds[cur[0]][0], bounds[hi][1], SURE if (end - g0 <= tail_reach and hi == cur[1]) else CAND)
+    for ci, T in enumerate(tiered):
+        for a, t in T:
+            i, L = a["i"], a["L"]
+            near = int(gap_owner[i - 1]) if i else 0
+            near = near or (int(gap_owner[i + L]) if i + L < lenC else 0)
+            kind = "參" if (near and near != ci + 1) else "引"
+            sg = {"c0": i, "c1": i + L, "s0": a["j"], "s1": a["j"] + a["Ls"], "kind": kind, "tier": t, "chain": ci,
+                  "sup": round(a["sup"], 1)}
+            if a["var"]:
+                sg["var"] = a["var"]
+            if a["weak"]:
+                sg["weak"] = 1
+            segs.append(sg)
     segs.sort(key=lambda s: (s["c0"], s["c1"]))
-    return segs, sum(owner)
+    cnt = collections.Counter()
+    for s in segs:
+        cnt[s["tier"]] += s["c1"] - s["c0"]
+        cnt[s["kind"] + s["tier"]] += s["c1"] - s["c0"]
+    return segs, cnt
+
+
+def loo_exam(chs, th, bounds):
+    """漏牒考：假装某一处確层引文没被认出，看按归属规则它那个位置会被归到哪——所归区间不含它真正所在的句，记一次错。
+    返回 (考的锚点数, 归错数)。它量的是"万一漏认一处牒文，后面的释文有多大可能被归错"。"""
+    starts = [b[0] for b in bounds]
+
+    def cl(j):
+        return max(0, min(len(bounds) - 1, bisect.bisect_right(starts, j) - 1))
+    n = wrong = 0
+    for ch in chs:
+        T = [(a, tier_of(a["sup"], th)) for a in ch["anchors"]]
+        T = [(a, t) for a, t in T if t and not a["weak"]]
+        for q in range(1, len(T) - 1):
+            (p, tp), (a, ta), (b, tb) = T[q - 1], T[q], T[q + 1]
+            if tp != SURE or ta != SURE:
+                continue
+            c0, c1 = cl(p["j"]), cl(p["j"] + p["Ls"] - 1)
+            ka, kb = cl(a["j"]), cl(b["j"])
+            hi = c1 if (c0 <= kb <= c1 + 1 or kb < c0) else kb - 1
+            n += 1
+            wrong += not (c0 <= ka <= hi)
+    return n, wrong
 
 
 def by_clause(segs, bounds):
-    """bounds: 经文每个小句在 S 中的 (s0, s1)。返回每个小句上归属的段落下标列表。"""
+    """经文每个小句上归属的段落下标列表。"""
     starts = [b[0] for b in bounds]
     res = [[] for _ in bounds]
     for k, s in enumerate(segs):
@@ -141,38 +577,63 @@ def by_clause(segs, bounds):
             q += 1
     return res
 
-# ---------------------------------------------------------------- 假经对照
-def fdr_thresholds(true_scores, decoy_score_lists, targets=(0.01, 0.1)):
-    """true_scores: 真经上各链得分；decoy_score_lists: 每个假经上各链得分的列表。
-    在得分 t 处：估计假发现数 = 各假经上 ≥t 的链数的均值；真发现数 = 真经上 ≥t 的链数；FDR = 前者/后者。
-    返回 {target: 最低的满足 FDR<=target 的得分 t（没有则 None）} 与完整曲线。"""
-    cand = sorted(set(true_scores))
-    curve = []
-    for t in cand:
-        tp = sum(1 for s in true_scores if s >= t)
-        fp = sum(sum(1 for s in d if s >= t) for d in decoy_score_lists) / max(1, len(decoy_score_lists))
-        curve.append((t, tp, fp, min(1.0, fp / tp) if tp else 1.0))
-    out = {}
-    for tg in targets:
-        ok = [t for t, tp, fp, r in curve if r <= tg]
-        out[tg] = min(ok) if ok else None
-    return out, curve
+
+def stats(chs, segs, cnt, bounds, lenS, lenC):
+    """整体形状（供关系判别与报表；只给指标，不下结论）。"""
+    covS = bytearray(lenS + 1)
+    n_sure = n_cand = 0
+    for s in segs:
+        if s["kind"] in ("引", "參"):
+            if s["tier"] == SURE:
+                covS[s["s0"]:s["s1"]] = b"\x01" * (s["s1"] - s["s0"]); n_sure += 1
+            else:
+                n_cand += 1
+    main = [s for s in segs if s["kind"] == "引" and s["tier"] == SURE]
+    top = collections.Counter(s["chain"] for s in main).most_common(1)
+    cl_hit = sum(1 for b in bounds if any(covS[b[0]:b[1]]))
+    return {"chains": len(chs), "top": round(chs[0]["score"], 1) if chs else 0.0,
+            "anchors_sure": n_sure, "anchors_cand": n_cand,
+            "cover_S": round(sum(covS) / max(1, lenS), 4), "clauses_hit": cl_hit, "clauses": len(bounds),
+            "order": round(top[0][1] / len(main), 4) if main else 0.0,
+            "scale": round(lenC / max(1, lenS), 2),
+            "frac_sure": round(cnt[SURE] / max(1, lenC), 4), "frac_cand": round(cnt[CAND] / max(1, lenC), 4),
+            "quote_sure": cnt["引" + SURE] + cnt["參" + SURE], "gloss_sure": cnt["釋" + SURE],
+            "gloss_frac": round(cnt["釋" + SURE] / max(1, lenC), 4)}
 
 
-def stats(chs, lenS, lenC):
-    """疏文相对经文的整体形状（供关系判别用；这里只给指标，不下结论）。"""
-    if not chs:
-        return {"chains": 0, "cover_S": 0.0, "scale": lenC / max(1, lenS)}
-    cov = bytearray(lenS)
-    for ch in chs:
-        for i, j, L, _ in ch["seeds"]:
-            cov[j:j + L] = b"\x01" * L
-    return {"chains": len(chs), "cover_S": sum(cov) / max(1, lenS), "scale": lenC / max(1, lenS),
-            "top": chs[0]["score"], "anchors": sum(len(c["seeds"]) for c in chs)}
+# ---------------------------------------------------------------- 总入口
+def decoy_windows(texts, size, n=8, avoid=None, common=12):
+    """从无关文献里按固定步长取 n 个长度为 size 的窗口作假经；与真经有 ≥common 字相同片段的窗口跳过（那是真平行文）。"""
+    grams = set()
+    if avoid and len(avoid) >= common:
+        grams = {avoid[k:k + common] for k in range(len(avoid) - common + 1)}
+    pool = []
+    for t in texts:
+        if len(t) < size:
+            continue
+        slots = max(1, min(n, len(t) // size))
+        step = (len(t) - size) // slots if slots > 1 else 0
+        for z in range(slots):
+            w = t[z * step:z * step + size]
+            if grams and any(w[k:k + common] in grams for k in range(0, len(w) - common + 1)):
+                continue
+            pool.append((z, w))
+    pool.sort(key=lambda p: p[0])                              # 各文献轮流取
+    return [w for _, w in pool[:n]]
 
 
-def locate(S, C, bounds=None, min_score=8.0):
-    chs = chains(S, C, min_score=min_score)
-    segs, n = attribute(chs, len(C))
-    return {"chains": chs, "segs": segs, "located": n, "frac": n / max(1, len(C)),
-            "clauses": by_clause(segs, bounds) if bounds else None, "stats": stats(chs, len(S), len(C))}
+def locate(S, C, bounds=None, decoys=(), bg=None, th=None, para_starts=None):
+    """th 给定则用它（整族汇总后的门槛）；否则用本疏自己的真假分布求门槛。没有假经又没有 th：一律不出（空结果）。"""
+    bg = bg or Background([S, C])
+    bounds = bounds or pseudo_bounds(len(S))
+    chs, sup = pipeline(S, C, bg, decoys)
+    dsup = [pipeline(D, C, bg)[1] for D in decoys]
+    return finish({"chains": chs, "sup_true": sup, "sup_decoy": dsup}, S, C, bounds, th, para_starts)
+
+
+def finish(res, S, C, bounds, th=None, para_starts=None):
+    th = th or thresholds(res["sup_true"], res["sup_decoy"])
+    segs, cnt = attribute(res["chains"], C, bounds, th, para_starts)
+    res.update({"th": th, "segs": segs, "clauses": by_clause(segs, bounds),
+                "stats": stats(res["chains"], segs, cnt, bounds, len(S), len(C))})
+    return res
