@@ -8,6 +8,7 @@ on:
       only: {description: "Comma-separated target ids (empty = all)", default: ""}
       nshards: {description: "Shards", default: "8"}
       workers: {description: "Workers per shard", default: "2"}
+      out_tag: {description: "Output folder tag (default: plan tag / run id)", default: ""}
 permissions:
   id-token: write
   contents: read
@@ -56,4 +57,6 @@ jobs:
       - if: steps.gate.outputs.go == '1'
         run: python3 -m indra.v4_batch --plan /tmp/plan.json --shard ${{ matrix.shard }} --nshards ${{ inputs.nshards }} --only "${{ inputs.only }}" --workers ${{ inputs.workers }} --out /tmp/outgz 2>&1 | grep -E " ok | FAILED |^shard " 
       - if: always() && steps.gate.outputs.go == '1'
-        run: python3 .github/scripts/oidc_store.py putdir /tmp/outgz engine-v4-out/${{ inputs.plan_tag || github.run_id }}/
+        run: |
+          [ "${{ matrix.shard }}" = "0" ] && cp /tmp/plan.json /tmp/outgz/plan.json
+          python3 .github/scripts/oidc_store.py putdir /tmp/outgz engine-v4-out/${{ inputs.out_tag || inputs.plan_tag || github.run_id }}/

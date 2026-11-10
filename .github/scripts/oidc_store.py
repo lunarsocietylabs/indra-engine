@@ -37,9 +37,10 @@ def put(path, data, ctype="application/octet-stream"):
 if __name__ == "__main__":
     import sys, hashlib, tarfile, io
     if sys.argv[1] == "engine":
-        man = json.loads(get("engine-v4/MANIFEST.json")); blob = b""; i = 0
+        pre = (open(".github/engine_prefix").read().strip() if os.path.exists(".github/engine_prefix") else "engine-v4") + "/"
+        man = json.loads(get(pre + "MANIFEST.json")); blob = b""; i = 0
         while True:
-            try: blob += get("engine-v4/part-%03d" % i)
+            try: blob += get(pre + "part-%03d" % i)
             except urllib.error.HTTPError as e:
                 if e.code == 404: break
                 raise
