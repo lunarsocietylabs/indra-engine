@@ -5,6 +5,7 @@ import argparse, contextlib, gzip, hashlib, json, os, re, sys, time, concurrent.
 from . import heldout, v4_run as R, v4_locate as V
 from .norm import norm
 
+sys.setrecursionlimit(30000)
 SITE = os.environ.get("INDRA_SITE", "")
 NCTL = 12
 
