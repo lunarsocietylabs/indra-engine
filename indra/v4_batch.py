@@ -16,7 +16,7 @@ def get_json(url):
             r = requests.get(url, timeout=300)
             if r.status_code == 200 and not r.headers.get("content-type", "").startswith("text/html"):
                 return r.json()
-            if r.status_code in (404, 403):
+            if r.status_code == 404 and a >= 2:
                 return None
         except Exception:
             pass
@@ -34,7 +34,7 @@ def get_doc(did, fam, meta):
             "author": m.get("author") or "", "paras": paras}
 
 
-def get_docs(ids, fam, meta, workers=12):
+def get_docs(ids, fam, meta, workers=6):
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         return [d for d in ex.map(lambda i: get_doc(i, fam, meta), ids) if d]
 
@@ -70,7 +70,7 @@ def main(a):
             target = get_doc(tid, "sutra:" + tid, meta)
             own_ids = sorted(c["id"] for c in f["comms"] if c.get("primary"))
             if not target or not own_ids:
-                raise RuntimeError("no target or no primary commentary")
+                raise RuntimeError(("no target" if not target else "no primary") + f" t={bool(target)} n={len(own_ids)}")
             bad = {c["id"] for c in f["comms"]}
             ctl_com = [c["id"] for c in pool if c["id"] not in bad][:NCTL]
             for i in ctl_com:
@@ -90,7 +90,7 @@ def main(a):
             print(f"{tid} ok {time.time() - t1:.0f}s", flush=True)
         except Exception as e:                       # 一部失败不拖累其它
             errors.append({"id": tid, "err": f"{type(e).__name__}: {str(e)[:200]}"})
-            print(f"{tid} FAILED {type(e).__name__}", flush=True)
+            print(f"{tid} FAILED {type(e).__name__} {str(e)[:60]}", flush=True)
         del_docs = None
     json.dump({"shard": a.shard, "done": done, "errors": errors, "seconds": round(time.time() - t0)},
               open(os.path.join(a.out, f"_shard{a.shard}.json"), "w"))
