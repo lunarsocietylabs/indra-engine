@@ -52,12 +52,11 @@ def run(out, only=None):
             sh = R.shape(S, C)
             res.append({"id": d["id"], "title": d["title"], "author": d["author"], "len": len(C),
                         "frac": round(r["frac"], 4), "stats": r["stats"], "chains": [round(c["score"], 1) for c in r["chains"]],
-                        "fdr": {str(k): v for k, v in th[0].items()} if isinstance(th, tuple) else th,
+                        "fdr": {str(k): v for k, v in th[0].items()},
                         "links": links, "kepan": K.parse(raw), "relation": R.classify(sh), "shape": sh,
                         "clauses": r["clauses"]})
         json.dump({"fam": fam, "id": tid, "title": title, "n_clauses": len(bounds), "commentaries": res},
                   open(os.path.join(out, fam + ".json"), "w", encoding="utf8"), ensure_ascii=False)
-        cov = sum(1 for r in res if r["clauses"] for _ in [0])
         rows.append((title, len(bounds), len(res), sum(r["frac"] for r in res) / max(1, len(res)),
                      sum(1 for r in res if r["relation"] == "注疏")))
     with open(os.path.join(out, "summary.md"), "w", encoding="utf8") as f:
