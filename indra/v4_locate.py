@@ -583,12 +583,11 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
                     claim(g0, g1, bounds[cur[0]][0], bounds[amb_hi][1], CAND, "弱")
                 elif b["weak"] and kb < cur[0]:
                     claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE)
-                elif cur[0] <= kb <= cur[1] and not tail:
-                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], _low(SURE, tb), "" if tb == SURE else "弱")
+                elif cur[0] <= kb <= cur[1] and not tail:      # 后一处只决定这段在哪里收尾，不决定它讲哪句：层级取前一处的
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE)
                 elif kb == cur[1] + 1 and not tail:
                     head = b["j"] - bounds[kb][0] <= HEAD_SLACK  # 下一处牒文从下一句句首起：先牒后释，确定
-                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1],
-                          _low(SURE, tb) if head else CAND, ("" if tb == SURE else "弱") if head else "中")
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE if head else CAND, "" if head else "中")
                 elif kb > cur[1]:
                     hi = kb if tail else kb - 1
                     claim(g0, g1, bounds[cur[0]][0], bounds[hi][1], CAND, "結" if tail else "跳")
@@ -624,7 +623,7 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
     return segs, cnt
 
 
-def loo_exam(chs, segs, th, bounds):
+def loo_exam(chs, segs, th, bounds, examples=None):
     """漏牒考（确定性的敏感度检验）：假装某一处確层引文 a 没被认出——它前一处 p 的释文就会一直延伸到后一处 b。
     比较 a 之后那段释文的实际归属，与"没有 a 时"它会得到的归属（即 p 之后那段的归属）：两者都是確层而所指的句子不相交，记一次错。
     （没有 a 时只会到候层的情形不计。）返回 (考的锚点数, 归错数)：量的是"万一漏认一处牒文，確层释文被归错的比例"。"""
@@ -647,7 +646,10 @@ def loo_exam(chs, segs, th, bounds):
                 continue                                      # 没有 a 时这一段只会到候层
             n += 1
             d0, d1 = cl(sa["s0"]), cl(sa["s1"] - 1)
-            wrong += d1 < c0 or d0 > c1
+            if d1 < c0 or d0 > c1:
+                wrong += 1
+                if examples is not None and len(examples) < 6:
+                    examples.append({"p": (p["i"], c0, c1), "a": (a["i"], a["L"], d0, d1), "b": (b["i"], kb)})
     return n, wrong
 
 

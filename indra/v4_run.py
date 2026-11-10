@@ -190,7 +190,19 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
         e = exam_quotes(coms[cid], res[cid]["segs"], S)
         if e:
             ex.update(e)
-    loo = [V.loo_exam(res[c]["chains"], res[c]["segs"], th, bounds) for c in own_ids]
+    loo_ex = {}
+    loo = []
+    for c in own_ids:
+        ex_c = []
+        loo.append(V.loo_exam(res[c]["chains"], res[c]["segs"], th, bounds, ex_c))
+        if ex_c and len(loo_ex) < 4:
+            loo_ex[c] = ex_c[:2]
+    for c, exs in loo_ex.items():                       # 日志里打出几例，供目检
+        C = coms[c]["C"]
+        for e in exs:
+            pi, c0, c1 = e["p"]; ai, aL, d0, d1 = e["a"]; bi, kb = e["b"]
+            print(f"  漏牒例 {c} 前[{c0}-{c1}]{clauses[c0]['t'][:10]} … 此[{d0}-{d1}]{clauses[d0]['t'][:10]} … 后[{kb}]")
+            print(f"      前后文：{C[max(pi, ai - 60):ai]}【{C[ai:ai + aL]}】{C[ai + aL:ai + aL + 60]}")
     conf = R.confusion([res[c]["relation"] for c in own_ids], [res[d["id"]]["relation"] for d in others])
     ctrl = [res[d["id"]]["stats"]["gloss_frac"] for d in others]
     kep = [K.count(res[c]["kepan"]) for c in own_ids]
