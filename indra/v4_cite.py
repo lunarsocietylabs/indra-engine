@@ -24,7 +24,7 @@ class RunIndex:
                 self.tab[t[p:p + k]].append((d, p))
         self.min_len = k + step - 1
 
-    def find_runs(self, piece, skip=None, max_occ=50):
+    def find_runs(self, piece, skip=None, max_occ=50, max_locs=3):
         """piece 里与库中某处逐字相同的极大片段。skip(text)->bool 为真的片段不要（如：目标经自己的话）。"""
         k, tab, out, seen = self.k, self.tab, {}, set()
         for i in range(len(piece) - k + 1):
@@ -44,10 +44,11 @@ class RunIndex:
                 seen.add((d, p - i))
                 if e - a >= self.min_len and not (skip and skip(piece[a:e])):
                     out.setdefault((a, e - a), []).append((d, b))
-        return [(a, ln, sorted(locs)) for (a, ln), locs in sorted(out.items())]
+        # 在库里出现超过 max_locs 处的片段是套语（如来十号、"阿耨多羅三藐三菩提"之类），不算引证
+        return [(a, ln, sorted(locs)) for (a, ln), locs in sorted(out.items()) if len(locs) <= max_locs]
 
 
-def cite_graph(clause_segs, texts, find_runs, tol=60, top=20):
+def cite_graph(clause_segs, texts, find_runs, tol=60, top=20, texts_lib=None):
     """clause_segs: {注疏号: [seg…]}（seg 含 c0,c1；只传归属到这一句的段落）；texts: {注疏号: 疏文（norm）}。
     返回 [{doc, pos, len, n, by:[注疏号…]}]，按独立引用家数降序。同一出处 = 同一部经、位置相差 ≤tol。"""
     hits = []
@@ -59,6 +60,7 @@ def cite_graph(clause_segs, texts, find_runs, tol=60, top=20):
                     hits.append((d, pos, ln, cd))
     hits.sort()
     out, cur = [], None
+    # 同一部经里同一段话（套语重出）只留一处：按 (经, 片段起点所在的 tol 窗口) 归组之外，再按出处文字去重（见下）
     for d, pos, ln, cd in hits:
         if cur and cur["doc"] == d and pos - cur["_last"] <= tol:
             cur["_last"] = pos; cur["len"] = max(cur["len"], ln); cur["_by"].add(cd)
@@ -68,6 +70,14 @@ def cite_graph(clause_segs, texts, find_runs, tol=60, top=20):
     for c in out:
         c["by"] = sorted(c.pop("_by")); c["n"] = len(c["by"]); c.pop("_last")
     out.sort(key=lambda x: (-x["n"], -x["len"], x["doc"], x["pos"]))
+    if texts_lib is not None:                                 # 同一部经里文字相同的出处并为一条
+        seen, ded = set(), []
+        for c in out:
+            key = (c["doc"], texts_lib[c["doc"]][c["pos"]:c["pos"] + 12])
+            if key in seen:
+                continue
+            seen.add(key); ded.append(c)
+        out = ded
     return out[:top]
 
 

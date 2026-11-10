@@ -20,7 +20,8 @@ v3 回答"疏文里哪几个字是引的经"。v4 回答"这一整段疏文在�
            真经与假经一比，就得到任一门槛下的假发现率（FDR）。確层 = FDR≤1%，候层 = FDR≤10%，其余不出。
            门槛由数据定，不由人定（见 thresholds_all）。
   7. 归属   只用过了门槛的锚点。两个锚点之间的释文：
-             前后锚点在同一句或紧邻两句 → 归前一句（先牒后释），层级取两端较低者；
+             前后锚点在同一句，或后一处从下一句句首牒起 → 归前一句（先牒后释），层级取两端较低者；
+             后一处从下一句中间牒起（句首可能漏认）→ 候层；
              中间跳过了若干句 → 归"前一句至后一句之前"这个区间，降为候层（除非略牒文法另有明文，见 v4_grammar）；
              后一锚点由"故云／故曰"引出（结引）→ 区间含后一句，候层。
            能带释文的锚点还须"在逐句讲经"：它周围那段经文按信息量计有一半以上被就近的引文牒到（见 _led）。
@@ -35,6 +36,7 @@ import numpy as np
 
 TAIL_MARKS = ("故云", "故曰", "故言", "故說", "故名", "故經云", "是故云")
 SURE, CAND = "確", "候"
+HEAD_SLACK = 2                     # 牒文起点离句首不超过几个字，算"从句首牒起"
 
 
 # ---------------------------------------------------------------- 背景语言模型
@@ -546,7 +548,7 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
                     gap_owner[run:x] = ci + 1
                     sg = {"c0": run, "c1": x, "s0": s0, "s1": s1, "kind": "釋", "tier": tt, "chain": ci}
                     if tt == CAND:
-                        sg["why"] = yy                         # 为什么只到候层：跳（中间跳过了句）/ 結（结引）/ 弱（旁边的锚点只到候层）/ 遠 / 回 / 尾
+                        sg["why"] = yy                         # 为什么只到候层：跳（中间跳过了句）/ 中（下一处牒文从句中起，句首可能漏认）/ 結（结引）/ 弱（旁边的锚点只到候层）/ 遠 / 回 / 尾
                     if yy == "跳" or yy == "結":
                         sg["amb"] = 1
                     segs.append(sg)
@@ -581,8 +583,12 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
                     claim(g0, g1, bounds[cur[0]][0], bounds[amb_hi][1], CAND, "弱")
                 elif b["weak"] and kb < cur[0]:
                     claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE)
-                elif cur[0] <= kb <= cur[1] + 1 and not (tail and kb > cur[1]):
+                elif cur[0] <= kb <= cur[1] and not tail:
                     claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], _low(SURE, tb), "" if tb == SURE else "弱")
+                elif kb == cur[1] + 1 and not tail:
+                    head = b["j"] - bounds[kb][0] <= HEAD_SLACK  # 下一处牒文从下一句句首起：先牒后释，确定
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1],
+                          _low(SURE, tb) if head else CAND, ("" if tb == SURE else "弱") if head else "中")
                 elif kb > cur[1]:
                     hi = kb if tail else kb - 1
                     claim(g0, g1, bounds[cur[0]][0], bounds[hi][1], CAND, "結" if tail else "跳")
@@ -618,26 +624,30 @@ def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reac
     return segs, cnt
 
 
-def loo_exam(chs, th, bounds):
-    """漏牒考：假装某一处確层引文没被认出，看按归属规则它那个位置会被归到哪——所归区间不含它真正所在的句，记一次错。
-    返回 (考的锚点数, 归错数)。它量的是"万一漏认一处牒文，后面的释文有多大可能被归错"。"""
+def loo_exam(chs, segs, th, bounds):
+    """漏牒考（确定性的敏感度检验）：假装某一处確层引文 a 没被认出——它前一处 p 的释文就会一直延伸到后一处 b。
+    比较 a 之后那段释文的实际归属，与"没有 a 时"它会得到的归属（即 p 之后那段的归属）：两者都是確层而所指的句子不相交，记一次错。
+    （没有 a 时只会到候层的情形不计。）返回 (考的锚点数, 归错数)：量的是"万一漏认一处牒文，確层释文被归错的比例"。"""
     starts = [b[0] for b in bounds]
 
     def cl(j):
         return max(0, min(len(bounds) - 1, bisect.bisect_right(starts, j) - 1))
+    gl = {s["c0"]: s for s in segs if s["kind"] in ("釋", "略")}
     n = wrong = 0
     for ch in chs:
-        T = [(a, tier_of(a["sup"], th, a["cov"])) for a in ch["anchors"]]
-        T = [(a, t) for a, t in T if t and not a["weak"]]
+        T = [a for a in ch["anchors"] if not a["weak"] and tier_of(a["sup"], th, a.get("cov", 0)) == SURE]
         for q in range(1, len(T) - 1):
-            (p, tp), (a, ta), (b, tb) = T[q - 1], T[q], T[q + 1]
-            if tp != SURE or ta != SURE:
+            p, a, b = T[q - 1], T[q], T[q + 1]
+            sp, sa = gl.get(p["i"] + p["L"]), gl.get(a["i"] + a["L"])
+            if not sp or not sa or sp["tier"] != SURE or sa["tier"] != SURE:
                 continue
-            c0, c1 = cl(p["j"]), cl(p["j"] + p["Ls"] - 1)
-            ka, kb = cl(a["j"]), cl(b["j"])
-            hi = c1 if (c0 <= kb <= c1 + 1 or kb < c0) else kb - 1
+            c0, c1 = cl(sp["s0"]), cl(sp["s1"] - 1)
+            kb = cl(b["j"])
+            if not (c0 <= kb <= c1 or (kb == c1 + 1 and b["j"] - bounds[kb][0] <= HEAD_SLACK)):
+                continue                                      # 没有 a 时这一段只会到候层
             n += 1
-            wrong += not (c0 <= ka <= hi)
+            d0, d1 = cl(sa["s0"]), cl(sa["s1"] - 1)
+            wrong += d1 < c0 or d0 > c1
     return n, wrong
 
 
@@ -679,23 +689,38 @@ def stats(chs, segs, cnt, bounds, lenS, lenC):
 
 
 # ---------------------------------------------------------------- 总入口
-def decoy_windows(texts, size, n=8, avoid=None, common=12):
-    """从无关文献里按固定步长取 n 个长度为 size 的窗口作假经；与真经有 ≥common 字相同片段的窗口跳过（那是真平行文）。"""
-    grams = set()
-    if avoid and len(avoid) >= common:
-        grams = {avoid[k:k + common] for k in range(len(avoid) - common + 1)}
-    pool = []
+def grams(texts, k=12):
+    """若干文本的全部 k 字片段（取哈希，省内存）。"""
+    out = set()
+    for t in texts:
+        for x in range(len(t) - k + 1):
+            out.add(hash(t[x:x + k]))
+    return out
+
+
+def decoy_windows(texts, size, n=8, avoid=None, cited=None, common=12, max_cited=1, slots_per_text=40, report=None):
+    """从无关文献里按固定步长取 n 个长度为 size 的窗口作假经。两种窗口不要：
+      与真经有 ≥common 字相同片段的（那是真平行文）；
+      与本族注疏有 > max_cited 处 ≥common 字相同片段的（注家引过这段，它就不是"无关"的）。
+    cited 是本族注疏的 grams()。各文献轮流取，确定性。report 给一个 dict 就记下取舍数。"""
+    ga = grams([avoid], common) if avoid and len(avoid) >= common else set()
+    pool, drop_s, drop_c = [], 0, 0
     for t in texts:
         if len(t) < size:
             continue
-        slots = max(1, min(n, len(t) // size))
+        slots = max(1, min(slots_per_text, len(t) // size))
         step = (len(t) - size) // slots if slots > 1 else 0
         for z in range(slots):
             w = t[z * step:z * step + size]
-            if grams and any(w[k:k + common] in grams for k in range(0, len(w) - common + 1)):
-                continue
+            hs = [hash(w[k:k + common]) for k in range(0, len(w) - common + 1)]
+            if ga and any(h in ga for h in hs):
+                drop_s += 1; continue
+            if cited is not None and len({h for h in hs if h in cited}) > max_cited:
+                drop_c += 1; continue
             pool.append((z, w))
-    pool.sort(key=lambda p: p[0])                              # 各文献轮流取
+    pool.sort(key=lambda p: p[0])
+    if report is not None:
+        report.update({"kept": min(n, len(pool)), "pool": len(pool), "drop_parallel": drop_s, "drop_cited": drop_c})
     return [w for _, w in pool[:n]]
 
 

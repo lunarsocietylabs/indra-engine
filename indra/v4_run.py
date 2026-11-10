@@ -83,8 +83,11 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
     t0 = time.time()
     S, bounds, clauses = prep_sutra(byid[tid])
     pool_txt = [norm("".join(t for _, t in byid[i]["paras"])) for i in heldout.NULL + heldout.BG + heldout.OTHER_SUTRAS if i in byid]
-    decoys = V.decoy_windows(pool_txt, len(S), n=8 if len(S) <= 20000 else 4, avoid=S)
     own = sorted((d for d in docs if d["fam"] == "com:" + fam), key=lambda d: d["id"])
+    cited = V.grams([norm("".join(t for _, t in d["paras"])) for d in own])
+    drep = {}
+    decoys = V.decoy_windows(pool_txt, len(S), n=8 if len(S) <= 20000 else 4, avoid=S, cited=cited, report=drep)
+    del cited
     others = sorted((d for d in docs if d["fam"].startswith("com:") and d["fam"] != "com:" + fam),
                     key=lambda d: (sum(len(t) for _, t in d["paras"]) > 400000, d["id"]))[:NEG]
     coms = {d["id"]: prep_com(d) for d in own + others}
@@ -164,15 +167,19 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
                     quote_docs.add(cid)
                 if s["tier"] == V.SURE and s["kind"] in ("釋", "略") and not s.get("amb") and s["c1"] - s["c0"] >= 12:
                     per.setdefault(cid, []).append(s)
-                if got < 3 and len(items) < 60 and s["c1"] - s["c0"] >= (2 if s["kind"] == "引" else 8):
-                    it = {"d": di, "k": s["kind"], "r": s["tier"], "c": s["c0"], "n": s["c1"] - s["c0"]}
+                c0, c1 = s["c0"], s["c1"]
+                if s["kind"] == "引" and s["c1"] - s["c0"] == s["s1"] - s["s0"]:   # 跨句的长引文：只取落在本句的那几个字
+                    c0 = s["c0"] + max(0, bounds[k][0] - s["s0"])
+                    c1 = s["c1"] - max(0, s["s1"] - bounds[k][1])
+                if got < 3 and len(items) < 60 and c1 - c0 >= (2 if s["kind"] == "引" else 8):
+                    it = {"d": di, "k": s["kind"], "r": s["tier"], "c": c0, "n": c1 - c0}
                     m = n2r[cid]
                     if m:
-                        it["x"] = c["raw"][m[s["c0"]]:m[min(s["c1"], s["c0"] + 80, len(m) - 1)]]
+                        it["x"] = c["raw"][m[c0]:m[min(c1, c0 + 80, len(m) - 1)]]
                     if s.get("amb"):
                         it["amb"] = 1
                     items.append(it); got += 1
-        cites = Ci.cite_graph(per, {c: coms[c]["C"] for c in per}, runs, top=8) if per else []
+        cites = Ci.cite_graph(per, {c: coms[c]["C"] for c in per}, runs, top=8, texts_lib=lib) if per else []
         for ct in cites:
             ct["x"] = lib[ct["doc"]][ct["pos"]:ct["pos"] + min(ct["len"], 40)]
         out_cl.append({"t": cl["t"], "lb": cl["lb"], "n": len(sure_docs), "nq": len(quote_docs),
@@ -183,7 +190,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
         e = exam_quotes(coms[cid], res[cid]["segs"], S)
         if e:
             ex.update(e)
-    loo = [V.loo_exam(first[c]["chains"], th, bounds) for c in own_ids]
+    loo = [V.loo_exam(res[c]["chains"], res[c]["segs"], th, bounds) for c in own_ids]
     conf = R.confusion([res[c]["relation"] for c in own_ids], [res[d["id"]]["relation"] for d in others])
     ctrl = [res[d["id"]]["stats"]["gloss_frac"] for d in others]
     kep = [K.count(res[c]["kepan"]) for c in own_ids]
@@ -192,7 +199,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
                  "relation": res[c]["relation"], "stats": res[c]["stats"], "base": res[c].get("base"),
                  "links": len(res[c]["links"]), "kepan": res[c]["kepan"]} for c in own_ids]
     summ = {"fam": fam, "id": tid, "title": title, "chars": len(S), "clauses": len(clauses), "docs": len(own_ids),
-            "th": {str(k): v for k, v in th.items()}, "decoys": len(decoys),
+            "th": {str(k): v for k, v in th.items()}, "decoys": len(decoys), "decoy_report": drep,
             "clauses_sure": sum(1 for c in out_cl if c["n"]), "clauses_quote": sum(1 for c in out_cl if c["nq"]),
             "frac_sure": _mean([res[c]["stats"]["frac_sure"] for c in own_ids]),
             "frac_cand": _mean([res[c]["stats"]["frac_cand"] for c in own_ids]),
@@ -282,6 +289,7 @@ def report(rows, out):
         L.append(f"| {s['title']} | {f(th.get('0.01'))}/{f(th.get('0.1'))}，覆盖度 {th.get('cov')} | {s['decoys']} | {s['loo'][1]}/{s['loo'][0]} | {s['weak']} | {s['var']} | "
                  f"{s['links']}/{s['elide']} | {s['kepan_nodes']}/{s['kepan_attached']} | "
                  f"{sum(1 for l in s['layers'] if l['ok'])}/{len(s['layers'])} | {s['cites']} | {vv} | {s['seconds']} |")
+    L += ["", "假经取舍：" + "；".join(f"{s['title']} {s['decoy_report']}" for s in rows)]
     L += ["", "候层释文的原因（字数）：" + "；".join(f"{s['title']} {s['why']}（本族共 {s['own_chars']} 字）" for s in rows)]
     L += ["", "判别明细：" + "；".join(f"{s['title']} 本族 {s['relation']['own']} 对照 {s['relation']['other']}" for s in rows)]
     txt = "\n".join(L) + "\n"

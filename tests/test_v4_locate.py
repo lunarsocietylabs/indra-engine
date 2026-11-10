@@ -120,6 +120,9 @@ def check():
     z = V.locate(S, C, bounds, (), bg)
     assert not z["segs"], "无对照不得出结果"
 
+    n, wrong = V.loo_exam(r["chains"], r["segs"], r["th"], bounds)
+    print(f"      漏牒考 错 {wrong}/{n}")
+    assert n >= 5 and wrong <= max(1, 0.1 * n), (n, wrong)
     # 确定性
     r2 = V.locate(S, C, bounds, decoys, bg)
     assert r2["segs"] == r["segs"] and r2["th"] == r["th"]

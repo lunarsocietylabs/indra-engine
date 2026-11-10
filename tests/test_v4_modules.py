@@ -61,8 +61,8 @@ def test_isolated_quote():
     print("isolated:", kinds, "gloss", u["stats"]["gloss_sure"])
     long = [s for s in u["segs"] if s["kind"] in ("引", "參") and s["c1"] - s["c0"] == 12]
     assert u["stats"]["gloss_sure"] == 0 and len(long) == 2 and not [s for s in u["segs"] if s["kind"] == "釋"], kinds
-    n, wrong = V.loo_exam(r["chains"], r["th"], bounds)
-    assert n >= 30 and wrong == 0, (n, wrong)
+    n, wrong = V.loo_exam(r["chains"], r["segs"], r["th"], bounds)
+    assert wrong == 0, (n, wrong)              # 每句只牒一次：漏一处只会落到候层，不会以確层归错
 
 
 def test_parallel():
