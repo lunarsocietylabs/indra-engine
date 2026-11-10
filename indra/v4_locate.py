@@ -22,6 +22,8 @@ v3 回答"疏文里哪几个字是引的经"。v4 回答"这一整段疏文在�
              前后锚点在同一句或紧邻两句 → 归前一句（先牒后释），层级取两端较低者；
              中间跳过了若干句 → 归"前一句至后一句之前"这个区间，降为候层（除非略牒文法另有明文，见 v4_grammar）；
              后一锚点由"故云／故曰"引出（结引）→ 区间含后一句，候层。
+           能带释文的锚点还须"在逐句讲经"：它周围那段经文按信息量计有一半以上被就近的引文牒到（见 _led）。
+           别的文献只是引到本经几句通用的话，只出引文、不带释文。链上最后一处引文之后的文字没有下一处牒文收口，只到候层。
            离锚点太远的释文降层或不出（reach）。不在主链上的零星引文记为「參」（参见别处经文），不带释文。
 
 接口只依赖字符串（已 norm 的字符流），无网络、无随机；同输入必得同输出。
@@ -429,23 +431,48 @@ def _low(t1, t2):
     return SURE if t1 == SURE and t2 == SURE else CAND
 
 
-def _sequential(pts, near):
-    """pts: [(疏文位置, 句号)]（已按疏文位置排序）。返回其中"有次第"的点：疏文 near 字之内另有一处確层引文，落在相邻或隔一句的经文上。
-    逐句讲经的地方必然如此；别的文献里偶然引到本经一句，则不然——后者只算引文，不带释文。"""
+def char_info(S, bg):
+    """经文逐字信息量的前缀和（背景模型下的条件信息量）。通用套语（"阿耨多羅三藐三菩提"）几乎不占分量。"""
+    out = np.zeros(len(S) + 1)
+    for j in range(len(S)):
+        out[j + 1] = out[j] + (bg.info(S[j - 1:j + 1]) - bg.info(S[j - 1]) if j else bg.info(S[0]))
+    return out
+
+
+def _led(A, pre, lenS, near, half=40, need=0.5, far=8000):
+    """A: 一条链上的確层锚点 [(疏文位置 i, 经文位置 j, 经文长 Ls)]，按 i 排序。返回"在逐句讲经"的锚点下标集合。
+    判据：以该锚点为中心、前后各 half 字的那段经文，按信息量计，有 need 以上被它前后 near 字疏文内的確层引文牒到。
+    逐句讲经的地方必然如此；别的文献只是引到本经几句通用的话，则不然——后者只算引文，不带释文。"""
     ok = set()
-    lo = 0
-    for k, (i, c) in enumerate(pts):
-        while pts[lo][0] < i - near:
-            lo += 1
+    pos = [a[0] for a in A]
+    for k, (i, j, Ls) in enumerate(A):
+        left = max(near, i - pos[max(0, k - 2)])               # 至少看到前后各两处引文（一句讲了几千字时），但不超过 far
+        right = max(near, pos[min(len(A) - 1, k + 2)] - i)
+        lo = bisect.bisect_left(pos, i - min(left, far))
+        hi_i = i + min(right, far)
+        w0, w1 = max(0, j - half), min(lenS, j + Ls + half)
+        tot = pre[w1] - pre[w0]
+        if tot <= 0:
+            continue
+        iv = []
         z = lo
-        while z < len(pts) and pts[z][0] <= i + near:
-            if z != k and 1 <= abs(pts[z][1] - c) <= 2:
-                ok.add((i, c)); break
+        while z < len(A) and A[z][0] <= hi_i:
+            a0, a1 = max(w0, A[z][1]), min(w1, A[z][1] + A[z][2])
+            if a1 > a0:
+                iv.append((a0, a1))
             z += 1
+        iv.sort()
+        got, end = 0.0, w0
+        for a0, a1 in iv:
+            a0 = max(a0, end)
+            if a1 > a0:
+                got += pre[a1] - pre[a0]; end = a1
+        if got >= need * tot:
+            ok.add(k)
     return ok
 
 
-def attribute(chs, C, bounds, th, para_starts=None, reach=2000, reach_max=8000, tail_reach=300, near=3000):
+def attribute(chs, C, bounds, th, para_starts=None, sinfo=None, reach=2000, reach_max=8000, tail_reach=300, near=3000):
     """返回 (segs, 字数统计)。seg = {c0,c1,s0,s1,kind,tier,chain[,var,weak,sup]}；kind ∈ 引／釋／參。"""
     lenC = len(C)
     starts = [b[0] for b in bounds]
@@ -468,59 +495,66 @@ def attribute(chs, C, bounds, th, para_starts=None, reach=2000, reach_max=8000, 
                 T.append((a, t))
         tiered.append(T)
     for ci, T in enumerate(tiered):
-        def claim(g0, g1, s0, s1, tier, amb=0):
+        def claim(g0, g1, s0, s1, tier, why=""):
             run = None
             for x in range(g0, g1 + 1):
                 free = x < g1 and not quote[x] and not gap_owner[x]
                 if free and run is None:
                     run = x
                 if not free and run is not None:
-                    far = run - g0
-                    tt = tier if far < reach else CAND
+                    tt, yy = (tier, why) if run - g0 < reach else (CAND, why or "遠")
                     gap_owner[run:x] = ci + 1
                     sg = {"c0": run, "c1": x, "s0": s0, "s1": s1, "kind": "釋", "tier": tt, "chain": ci}
-                    if amb:
+                    if tt == CAND:
+                        sg["why"] = yy                         # 为什么只到候层：跳（中间跳过了句）/ 結（结引）/ 弱（旁边的锚点只到候层）/ 遠 / 回 / 尾
+                    if yy == "跳" or yy == "結":
                         sg["amb"] = 1
                     segs.append(sg)
                     run = None
-        cur, amb_hi = None, -1                                 # 当前所讲的经句（只由確层锚点确立）；其后候层锚点指到的最远句
-        led = _sequential([(a["i"], cl(a["j"])) for a, t in T if t == SURE], near)
+        sure = [(a["i"], a["j"], a["Ls"]) for a, t in T if t == SURE]
+        lenS = bounds[-1][1]
+        pre = sinfo if sinfo is not None else np.arange(lenS + 1, dtype=float)
+        led_k = _led(sure, pre, lenS, near) if sure else set()
+        led = {sure[k][:2] for k in led_k}
+        cur, amb_hi = None, -1                                 # 当前所讲的经句（只由"在逐句讲经"的確层锚点确立）；其后别的锚点指到的最远句
         for q, (a, t) in enumerate(T):
             ka, ke = cl(a["j"]), cl(a["j"] + a["Ls"] - 1)
-            if t == SURE and (a["i"], ka) not in led:
-                t = CAND                                       # 孤立的一处引文（"如某經云…"）：是引文，不是在逐句讲这部经
+            if t == SURE and (a["i"], a["j"]) not in led:
+                t = CAND
             if t == SURE and not (cur is not None and a["weak"] and ka < cur[0]):
                 cur, amb_hi = (ka, ke), -1                     # 短牒文往回指：不改变"当前句"
             elif cur is not None and ke > cur[1]:
                 amb_hi = max(amb_hi, ke)
             if cur is None:
-                continue                                       # 还没有確层锚点：释文不归属
+                continue                                       # 还没有这样的锚点：释文不归属
             g0 = a["i"] + a["L"]
             if q + 1 < len(T):
                 b, tb = T[q + 1]
+                if tb == SURE and (b["i"], b["j"]) not in led:
+                    tb = CAND
                 g1 = min(b["i"], g0 + reach_max)
                 if g1 <= g0:
                     continue
                 kb = cl(b["j"])
                 tail = any(C[max(0, b["i"] - 4):b["i"]].endswith(m) for m in TAIL_MARKS)
                 if amb_hi > cur[1]:
-                    claim(g0, g1, bounds[cur[0]][0], bounds[amb_hi][1], CAND, amb=1)
+                    claim(g0, g1, bounds[cur[0]][0], bounds[amb_hi][1], CAND, "弱")
                 elif b["weak"] and kb < cur[0]:
                     claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], SURE)
                 elif cur[0] <= kb <= cur[1] + 1 and not (tail and kb > cur[1]):
-                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], _low(SURE, tb))
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], _low(SURE, tb), "" if tb == SURE else "弱")
                 elif kb > cur[1]:
                     hi = kb if tail else kb - 1
-                    claim(g0, g1, bounds[cur[0]][0], bounds[hi][1], CAND, amb=1)
+                    claim(g0, g1, bounds[cur[0]][0], bounds[hi][1], CAND, "結" if tail else "跳")
                 else:
-                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], CAND)
+                    claim(g0, g1, bounds[cur[0]][0], bounds[cur[1]][1], CAND, "回")
             else:
                 end = min(lenC, g0 + tail_reach)
                 if para_starts:
                     p = bisect.bisect_right(para_starts, g0)
                     end = min(lenC, para_starts[p] if p < len(para_starts) else lenC, g0 + reach)
                 hi = max(cur[1], amb_hi)
-                claim(g0, end, bounds[cur[0]][0], bounds[hi][1], SURE if (end - g0 <= tail_reach and hi == cur[1]) else CAND)
+                claim(g0, end, bounds[cur[0]][0], bounds[hi][1], CAND, "尾")   # 链的最后一处引文之后：没有下一处牒文收口，只到候层
     for ci, T in enumerate(tiered):
         for a, t in T:
             i, L = a["i"], a["L"]
@@ -539,6 +573,8 @@ def attribute(chs, C, bounds, th, para_starts=None, reach=2000, reach_max=8000, 
     for s in segs:
         cnt[s["tier"]] += s["c1"] - s["c0"]
         cnt[s["kind"] + s["tier"]] += s["c1"] - s["c0"]
+        if s.get("why"):
+            cnt["why" + s["why"]] += s["c1"] - s["c0"]
     return segs, cnt
 
 
@@ -598,7 +634,8 @@ def stats(chs, segs, cnt, bounds, lenS, lenC):
             "scale": round(lenC / max(1, lenS), 2),
             "frac_sure": round(cnt[SURE] / max(1, lenC), 4), "frac_cand": round(cnt[CAND] / max(1, lenC), 4),
             "quote_sure": cnt["引" + SURE] + cnt["參" + SURE], "gloss_sure": cnt["釋" + SURE],
-            "gloss_frac": round(cnt["釋" + SURE] / max(1, lenC), 4)}
+            "gloss_frac": round(cnt["釋" + SURE] / max(1, lenC), 4),
+            "why": {k[3:]: v for k, v in sorted(cnt.items()) if k.startswith("why")}}
 
 
 # ---------------------------------------------------------------- 总入口
@@ -622,18 +659,19 @@ def decoy_windows(texts, size, n=8, avoid=None, common=12):
     return [w for _, w in pool[:n]]
 
 
-def locate(S, C, bounds=None, decoys=(), bg=None, th=None, para_starts=None):
+def locate(S, C, bounds=None, decoys=(), bg=None, th=None, para_starts=None, sinfo=None):
     """th 给定则用它（整族汇总后的门槛）；否则用本疏自己的真假分布求门槛。没有假经又没有 th：一律不出（空结果）。"""
     bg = bg or Background([S, C])
     bounds = bounds or pseudo_bounds(len(S))
     chs, sup = pipeline(S, C, bg, decoys)
     dsup = [pipeline(D, C, bg)[1] for D in decoys]
-    return finish({"chains": chs, "sup_true": sup, "sup_decoy": dsup}, S, C, bounds, th, para_starts)
+    sinfo = sinfo if sinfo is not None else char_info(S, bg)
+    return finish({"chains": chs, "sup_true": sup, "sup_decoy": dsup}, S, C, bounds, th, para_starts, sinfo)
 
 
-def finish(res, S, C, bounds, th=None, para_starts=None):
+def finish(res, S, C, bounds, th=None, para_starts=None, sinfo=None):
     th = th or thresholds(res["sup_true"], res["sup_decoy"])
-    segs, cnt = attribute(res["chains"], C, bounds, th, para_starts)
+    segs, cnt = attribute(res["chains"], C, bounds, th, para_starts, sinfo)
     res.update({"th": th, "segs": segs, "clauses": by_clause(segs, bounds),
                 "stats": stats(res["chains"], segs, cnt, bounds, len(S), len(C))})
     return res

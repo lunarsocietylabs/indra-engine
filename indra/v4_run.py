@@ -89,6 +89,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
                     key=lambda d: (sum(len(t) for _, t in d["paras"]) > 400000, d["id"]))[:NEG]
     coms = {d["id"]: prep_com(d) for d in own + others}
     _G.clear(); _G.update({"S": S, "bg": bg, "decoys": decoys, "coms": coms})
+    sinfo = V.char_info(S, bg)
     first = {}
     if workers > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("fork")) as ex:
@@ -104,7 +105,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
     res, tally = {}, collections.Counter()
     for cid in sorted(coms):
         c = coms[cid]
-        r = V.finish(first[cid], S, c["C"], bounds, th, c["paras"])
+        r = V.finish(first[cid], S, c["C"], bounds, th, c["paras"], sinfo)
         r["links"], r["kepan"] = [], []
         if c["idx"] is not None and cid in own_ids:
             r["links"] = G.find_links(c["raw"], S, G.expecter(r["segs"]), c["idx"])
@@ -122,7 +123,7 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
         dz = V.decoy_windows(pool_txt, len(A["C"]), n=4, avoid=None)
         if not dz:
             continue
-        rb = V.locate(A["C"], B["C"], ab, dz, bg)
+        rb = V.locate(A["C"], B["C"], ab, dz, bg, sinfo=None)
         okay = Ly.confirm(rb["stats"])
         gain = 0
         if okay:
@@ -196,6 +197,8 @@ def run_family(fam, tid, title, docs, byid, bg, out, workers):
             "frac_cand": _mean([res[c]["stats"]["frac_cand"] for c in own_ids]),
             "control_mean": _mean(ctrl), "control_max": max(ctrl) if ctrl else None, "control_n": len(ctrl),
             "exam": dict(ex), "relation": conf, "loo": [sum(a for a, _ in loo), sum(b for _, b in loo)],
+            "why": dict(sum((collections.Counter(res[c]["stats"]["why"]) for c in own_ids), collections.Counter())),
+            "chars": len(S), "own_chars": sum(len(coms[c]["C"]) for c in own_ids),
             "weak": sum(1 for c in own_ids for s in res[c]["segs"] if s.get("weak")),
             "var": sum(1 for c in own_ids for s in res[c]["segs"] if s.get("var")),
             "elide": sum(res[c].get("n_elide", 0) for c in own_ids), "links": sum(len(res[c]["links"]) for c in own_ids),
@@ -240,10 +243,10 @@ def sample(summ, out_cl, doc_rows, others, res):
             print(f"     {doc_rows[it['d']]['id']} {it['k']}{it['r']}{'?' if it.get('amb') else ''} {it.get('x', '')[:60]}")
         for ct in c["cites"][:2]:
             print(f"     ⇢ {ct['doc']} ×{ct['n']} {ct['x']}")
-    for d in doc_rows[:6]:
-        tr = d["kepan"]
-        print(f"  {d['id']} {d['title'][:16]} {d['relation']} 確{d['stats']['frac_sure']} 候{d['stats']['frac_cand']} "
-              f"句{d['stats']['clauses_hit']}/{d['stats']['clauses']} 序{d['stats']['order']} 科{K.count(tr)}")
+    for d in doc_rows:
+        st = d["stats"]
+        print(f"  {d['id']} {d['title'][:14]} {d['relation']} 字{d['len']} 確{st['frac_sure']} 候{st['frac_cand']} "
+              f"句{st['clauses_hit']}/{st['clauses']} 序{st['order']} 錨{st['anchors_sure']}/{st['anchors_cand']} 科{K.count(d['kepan'])} {st['why']}")
     shown = 0
     for d in doc_rows:
         for nd in d["kepan"]:
@@ -252,7 +255,8 @@ def sample(summ, out_cl, doc_rows, others, res):
                 print(f"  科 {d['id']} 分{nd['n']}{nd['u']}: " + " ｜ ".join(f"{it['k']}{it['head'] or ''}〔{it['label'][:10]}〕{it['s']}" for it in nd["items"]))
     for d in others:
         st = res[d["id"]]["stats"]
-        print(f"  对照 {d['id']} {d['title'][:16]} {res[d['id']]['relation']} 引確{st['quote_sure']}字 釋確{st['gloss_sure']}字 錨{st['anchors_sure']}")
+        print(f"  对照 {d['id']} {d['title'][:14]} {res[d['id']]['relation']} 字{len(_G['coms'][d['id']]['C'])} 引確{st['quote_sure']} 釋確{st['gloss_sure']} "
+              f"句{st['clauses_hit']}/{st['clauses']} 序{st['order']} 錨{st['anchors_sure']}")
 
 
 def report(rows, out):
@@ -277,6 +281,7 @@ def report(rows, out):
         L.append(f"| {s['title']} | {f(th.get('0.01'))}/{f(th.get('0.1'))} | {s['decoys']} | {s['loo'][1]}/{s['loo'][0]} | {s['weak']} | {s['var']} | "
                  f"{s['links']}/{s['elide']} | {s['kepan_nodes']}/{s['kepan_attached']} | "
                  f"{sum(1 for l in s['layers'] if l['ok'])}/{len(s['layers'])} | {s['cites']} | {vv} | {s['seconds']} |")
+    L += ["", "候层释文的原因（字数）：" + "；".join(f"{s['title']} {s['why']}（本族共 {s['own_chars']} 字）" for s in rows)]
     L += ["", "判别明细：" + "；".join(f"{s['title']} 本族 {s['relation']['own']} 对照 {s['relation']['other']}" for s in rows)]
     txt = "\n".join(L) + "\n"
     open(os.path.join(out, "summary.md"), "w", encoding="utf8").write(txt)
