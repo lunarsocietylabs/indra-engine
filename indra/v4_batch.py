@@ -30,6 +30,10 @@ def get_doc(did, fam, meta):
     if not j:
         return None
     paras = [(p.get("lb0") or "", p.get("t") or "") for p in j.get("paragraphs", []) if p.get("t")]
+    if did == "T08n0251":               # 心經卷首有明代御制序：正文自「觀自在菩薩」起
+        for i, (lb, t) in enumerate(paras):
+            if "觀自在菩薩" in t:
+                j = t.index("觀自在菩薩"); paras = [(lb, t[j:])] + paras[i + 1:]; break
     m = meta.get(did, {})
     return {"id": did, "fam": fam, "title": re.sub(r"^.*No\. *[0-9A-Za-z]+ *", "", m.get("title") or ""),
             "author": m.get("author") or "", "paras": paras}
