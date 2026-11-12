@@ -1,8 +1,17 @@
 name: selftest
 on:
+  workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - 'indra/**'
+      - 'native/**'
+      - 'tests/**'
   pull_request:
+    paths:
+      - 'indra/**'
+      - 'native/**'
+      - 'tests/**'
 concurrency: {group: "${{ github.workflow }}-${{ github.ref }}", cancel-in-progress: true}
 jobs:
   selftest:
