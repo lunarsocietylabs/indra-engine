@@ -1,0 +1,60 @@
+name: v4-step15-public-acceptance
+# Public/free standard Runner. No proprietary source or corpus content is committed to this repository.
+on:
+  workflow_run:
+    workflows: ["v4-export-once"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: v4-step15-public-acceptance
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify final index, sample pages and reverse citations
+        run: |
+          python3 - <<'PY'
+          import json, sys, urllib.request
+          sys.path.insert(0, ".github/scripts")
+          import oidc_store as store
+          root = "https://aicanon.omnisun.workers.dev/data/v4-preview/"
+          ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+          def get(path, timeout=90):
+              req = urllib.request.Request(root + path, headers={"User-Agent": ua, "Cache-Control": "no-cache"})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  assert r.status == 200, (path,r.status)
+                  return json.load(r)
+          index=get("index.json")
+          assert len(index) == 1196, ("unexpected index length",len(index))
+          ids={x["id"] for x in index}
+          assert len(ids) == len(index)
+          tags=["42879981497","42892321782","43175083562"]
+          targets=set()
+          for tag in tags:
+              plan=json.loads(store.get("engine-v4-out/"+tag+"/plan.json"))
+              targets.update(x["target"] for x in plan["families"])
+          assert len(targets)==1196, len(targets)
+          assert ids==targets, ("missing",sorted(targets-ids)[:10],"extra",sorted(ids-targets)[:10])
+          for tid in ["T08n0251","T12n0374","X29n0596"]:
+              page=get(tid+".json",timeout=120)
+              assert page["id"]==tid
+              assert "docs" in page and "paras" in page
+              if page.get("parts"):
+                  part=get(tid+".p000.json",timeout=120)
+                  assert isinstance(part.get("paras"),list)
+          # Check one reverse link from the known Heart Sutra commentary set
+          c=get("c/X29n0596.json",timeout=120)
+          assert isinstance(c.get("t"),list) and isinstance(c.get("e"),list)
+          for edge in c["e"][:20]:
+              assert 0 <= edge[2] < len(c["t"])
+          print("PASS: 1196/1196 targets; key pages; reverse citation indices")
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("PASS V4 step15: 1196/1196 targets, pages and reverse index verified.\n")
+          PY
