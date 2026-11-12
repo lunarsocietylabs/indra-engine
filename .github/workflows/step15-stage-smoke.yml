@@ -38,8 +38,9 @@ jobs:
           assert 'SEARCH="https://zz-search.omnisun.workers.dev/api/search"' in html
           assert 'group=doc&limit=100' in html
           scripts=re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>",html,re.S)
-          assert len(scripts)==1,len(scripts)
-          open("/tmp/step15.js","w",encoding="utf-8").write(scripts[0])
+          main_scripts=[s for s in scripts if "function search(q)" in s and "group=doc&limit=100" in s]
+          assert len(main_scripts)==1, ("main scripts",len(main_scripts),"all",len(scripts))
+          open("/tmp/step15.js","w",encoding="utf-8").write(main_scripts[0])
           d=json.loads(get("https://zz-search.omnisun.workers.dev/api/search?q=%E5%87%86%E6%8F%90&group=doc&limit=100"))
           assert d.get("ok") and d.get("group")=="doc"
           assert d.get("nd",0)>=100, d.get("nd")
