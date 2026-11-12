@@ -12,6 +12,9 @@
     python3 tools/export_v4_r2.py                                   # 探针默认：写 data/v4-preview-probe/
     python3 tools/export_v4_r2.py --ids F27n1061+X26n0540 --prefix data/v4-preview-probe/
     python3 tools/export_v4_r2.py --tag 43175083562 --prefix data/v4-preview/ --allow-prod
+    python3 tools/export_v4_r2.py --tag 42879981497,42892321782,43175083562 --prefix data/v4-preview/ --allow-prod
+        # 注意：index.json 与 c/*.json 是「一次运行内的全量聚合」，不是增量合并。
+        # 只跑一个新 tag 会把这些文件覆盖成该 tag 的子集。
 
 安全闸：默认前缀是探针目录；前缀落在 data/v4-preview/ 之内且没给 --allow-prod 时直接退出 2。
 """
@@ -228,52 +231,60 @@ def normalized_prefix(p):
 def run(r2, args):
     t0 = time.time()
     dst_prefix = normalized_prefix(args.prefix)
-    src_prefix = args.src_prefix.strip().lstrip("/")
-    if not src_prefix.endswith("/"):
-        src_prefix += "/"
-    src_prefix += args.tag + "/"          # 同 export_site： engine-v4-out/<tag>/
+    src_root = args.src_prefix.strip().lstrip("/")
+    if not src_root.endswith("/"):
+        src_root += "/"
+    tags = [t.strip() for t in args.tag.split(",") if t.strip()]
+    if not tags:
+        raise SystemExit("--tag 不能为空")
     stats = {"objects": 0, "bytes": 0}
 
-    # --- plan → targets（与 export_site 的去重顺序一致：families 顺序，首次出现为准）---
-    plan = json.loads(r2.get(args.src_bucket, src_prefix + "plan.json"))["families"]
-    plan_ids = []
-    for f in plan:
-        t = f["target"]
-        if t not in plan_ids:
-            plan_ids.append(t)
+    # --- plan → (tag, target)。与 export_site 一致：families 顺序，跨 tag 去重 ---
+    plans = {}
+    for tag in tags:
+        plans[tag] = [f["target"] for f in
+                      json.loads(r2.get(args.src_bucket, src_root + tag + "/plan.json"))["families"]]
 
-    if args.ids:
-        targets = [x for x in args.ids.split("+") if x]
-        unknown = [x for x in targets if x not in plan_ids]
-        if unknown:
-            print("[warn] 不在 plan 里的 id（仍按指定处理）: %s" % ",".join(unknown), file=sys.stderr)
+    if args.ids:                                   # --ids 按给定顺序处理；归属 tag 由 plan 反查
+        jobs = []
+        for tid in [x for x in args.ids.split("+") if x]:
+            owner = next((t for t in tags if tid in plans[t]), tags[0])
+            if owner == tags[0] and tid not in plans[tags[0]]:
+                print("[warn] 不在任何 plan 里的 id（仍按 %s 处理）: %s" % (owner, tid), file=sys.stderr)
+            jobs.append((owner, tid))
     else:
-        targets = plan_ids
+        jobs, plan_seen = [], set()
+        for tag in tags:
+            for tid in plans[tag]:
+                if tid in plan_seen:
+                    continue
+                plan_seen.add(tid)
+                jobs.append((tag, tid))
     if args.limit and args.limit > 0:
-        targets = targets[: args.limit]
-    print("tag=%s targets=%d plan=%d prefix=%s dry_run=%s"
-          % (args.tag, len(targets), len(plan_ids), dst_prefix, args.dry_run))
+        jobs = jobs[: args.limit]
+    print("tag=%s targets=%d plans=%s prefix=%s dry_run=%s"
+          % (args.tag, len(jobs), {t: len(plans[t]) for t in tags}, dst_prefix, args.dry_run))
 
     index, tgt, inv, seen = [], [], {}, set()
     ok = skipped = 0
     skipped_ids = []
 
-    for i, tid in enumerate(targets, 1):
+    for i, (tag, tid) in enumerate(jobs, 1):
         if tid in seen:
             continue
         seen.add(tid)
-        raw = fetch(r2, args.src_bucket, src_prefix, tid)
+        raw = fetch(r2, args.src_bucket, src_root + tag + "/", tid)
         if not raw:
             skipped += 1
             skipped_ids.append(tid)
-            print("[%d/%d] SKIP %s（源对象与分片都不存在）" % (i, len(targets), tid))
+            print("[%d/%d] SKIP %s/%s（源对象与分片都不存在）" % (i, len(jobs), tag, tid))
             continue
         try:
             j = json.loads(gzip.decompress(raw))
         except Exception as e:
             skipped += 1
             skipped_ids.append(tid)
-            print("[%d/%d] SKIP %s（解压/解析失败: %s）" % (i, len(targets), tid, e))
+            print("[%d/%d] SKIP %s/%s（解压/解析失败: %s）" % (i, len(jobs), tag, tid, e))
             continue
 
         ti = len(tgt)
@@ -302,7 +313,7 @@ def run(r2, args):
                       "docs": len(w["docs"]), "clauses": ncl, "hit": nh})
         ok += 1
         print("[%d/%d] %s %s docs=%d paras=%d clauses=%d hit=%d parts=%d bytes=%d"
-              % (i, len(targets), tid, w["title"], len(w["docs"]), len(ps_), ncl, nh,
+              % (i, len(jobs), tid, w["title"], len(w["docs"]), len(ps_), ncl, nh,
                  w.get("parts", 0), nbytes))
         del j
 
@@ -323,7 +334,7 @@ def run(r2, args):
 
     print("----")
     print("tag=%s 目标=%d 成功=%d 跳过=%d 写入对象=%d(反链 %d + index 1) 总字节=%d 耗时=%.1fs"
-          % (args.tag, len(targets), ok, skipped, stats["objects"], inv_obj, stats["bytes"],
+          % (args.tag, len(jobs), ok, skipped, stats["objects"], inv_obj, stats["bytes"],
              time.time() - t0))
     if skipped_ids:
         print("跳过清单: %s" % ",".join(skipped_ids))
@@ -333,7 +344,9 @@ def run(r2, args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="V4 注疏 R2→R2 导出（默认只写探针前缀）")
-    ap.add_argument("--tag", default="43175083562")
+    ap.add_argument("--tag", default="43175083562",
+                    help="源 tag；可用逗号写多个（如 42879981497,42892321782,43175083562），"
+                         "一次跑全才能保住 index/反链的跨 tag 聚合")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 个 target（0=全量）")
     ap.add_argument("--ids", default="", help="只处理指定 id，用 + 分隔")
     ap.add_argument("--prefix", default="data/v4-preview-probe/", help="目标前缀（默认探针目录）")
