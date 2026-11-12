@@ -1,8 +1,17 @@
 name: v4-export-once
-# One-off: hardcoded run (workflow_dispatch inputs were not reaching the job).
-# Writes V4 layer results from private R2 -> frontend JSON under data/v4-preview/.
-on: {workflow_dispatch: {}}
+# One-off public standard Runner. Refuses redundant 5+ GB R2 export when the completed index already exists.
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force re-export even if the 1196-entry completed index exists"
+        required: false
+        type: boolean
+        default: false
 permissions: {contents: read}
+concurrency:
+  group: v4-export-once
+  cancel-in-progress: true
 jobs:
   export:
     runs-on: ubuntu-latest
@@ -11,12 +20,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
+      - name: Skip already completed export
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          python3 - <<'PY'
+          import json,os,urllib.request
+          if os.getenv("FORCE","false").lower()=="true":
+              print("forced; no skip");raise SystemExit(0)
+          base="https://aicanon.omnisun.workers.dev/data/v4-preview/"
+          ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+          try:
+              def get(path):
+                  u=urllib.request.Request(base+path,headers={"User-Agent":ua,"Cache-Control":"no-cache"})
+                  with urllib.request.urlopen(u,timeout=60) as r:
+                      return json.load(r)
+              index=get("index.json")
+              reverse=get("c/X29n0596.json")
+              okay=len(index)==1196 and len({x["id"] for x in index})==1196 and isinstance(reverse.get("e"),list)
+          except Exception as e:
+              print("preflight requires export:",str(e)[:150]);okay=False
+          if okay:
+              print("SKIP: completed 1196-page export and reverse index already exist")
+              with open(os.environ["GITHUB_OUTPUT"],"a") as f:f.write("skip=1\n")
+          else:print("RUN: missing or incomplete preview")
+          PY
       - name: export
+        if: steps.check.outputs.skip != '1'
         env:
           CF_R2_TOKEN: ${{ secrets.CF_R2_TOKEN }}
           CF_ACC_ID: ${{ secrets.CF_ACC_ID }}
         run: |
           set -euo pipefail
-          echo "token_len=${#CF_R2_TOKEN} acc_len=${#CF_ACC_ID}"
           [ -n "${CF_R2_TOKEN:-}" ] && [ -n "${CF_ACC_ID:-}" ] || { echo "missing secrets"; exit 3; }
           python3 tools/export_v4_r2.py --tag 42879981497,42892321782,43175083562 --prefix data/v4-preview/ --allow-prod
