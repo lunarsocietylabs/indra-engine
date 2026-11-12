@@ -1,0 +1,58 @@
+name: v4-export-r2
+# Manual only. Converts V4 layer results from private R2 (lst-private-docs) into frontend JSON
+# in ai-canon-site. Runs on this PUBLIC repo's free minutes (does not consume the org's included minutes).
+# Never touches production Workers or the public site prefix unless prefix is data/v4-preview/ AND confirm=EXPORT.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:       {description: "batch folder (engine-v4-out/<tag>)", default: "43175083562", required: true}
+      limit:     {description: "0 = all targets", default: "0"}
+      ids:       {description: "optional id list separated by +", default: ""}
+      prefix:    {description: "destination prefix", default: "data/v4-preview-probe/"}
+      confirm:   {description: "type EXPORT to allow writing data/v4-preview/", default: ""}
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: export (R2 -> R2)
+        env:
+          CF_R2_TOKEN: ${{ secrets.CF_R2_TOKEN }}
+          CF_ACC_ID: ${{ secrets.CF_ACC_ID }}
+          TAG: ${{ inputs.tag }}
+          LIMIT: ${{ inputs.limit }}
+          IDS: ${{ inputs.ids }}
+          PREFIX: ${{ inputs.prefix }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          ARGS=(--tag "$TAG" --prefix "$PREFIX")
+          [ "$LIMIT" != "0" ] && ARGS+=(--limit "$LIMIT")
+          [ -n "$IDS" ] && ARGS+=(--ids "$IDS")
+          case "$PREFIX" in
+            data/v4-preview/*) [ "$CONFIRM" = "EXPORT" ] || { echo "REFUSE: prod prefix requires confirm=EXPORT"; exit 2; } ;;
+          esac
+          python3 tools/export_v4_r2.py "${ARGS[@]}"
+      - name: verify objects
+        env:
+          CF_R2_TOKEN: ${{ secrets.CF_R2_TOKEN }}
+          CF_ACC_ID: ${{ secrets.CF_ACC_ID }}
+          PREFIX: ${{ inputs.prefix }}
+        run: |
+          python3 - <<'P'
+          import os, json, urllib.request, urllib.parse
+          tok, acc = os.environ["CF_R2_TOKEN"], os.environ["CF_ACC_ID"]
+          pfx = os.environ["PREFIX"]
+          u = f"https://api.cloudflare.com/client/v4/accounts/{acc}/r2/buckets/ai-canon-site/objects?prefix={urllib.parse.quote(pfx)}&per_page=5"
+          r = urllib.request.Request(u, headers={"Authorization": "Bearer " + tok})
+          d = json.loads(urllib.request.urlopen(r, timeout=60).read())
+          res = d.get("result") or []
+          print("objects under", pfx, "=", len(res))
+          for z in res[:5]:
+              print("  %9d %s" % (z.get("size", 0), z.get("key")))
+          P
