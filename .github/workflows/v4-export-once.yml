@@ -19,4 +19,4 @@ jobs:
           set -euo pipefail
           echo "token_len=${#CF_R2_TOKEN} acc_len=${#CF_ACC_ID}"
           [ -n "${CF_R2_TOKEN:-}" ] && [ -n "${CF_ACC_ID:-}" ] || { echo "missing secrets"; exit 3; }
-          python3 tools/export_v4_r2.py --tag 43175083562 --prefix data/v4-preview/ --allow-prod
+          python3 tools/export_v4_r2.py --tag 42879981497,42892321782,43175083562 --prefix data/v4-preview/ --allow-prod
