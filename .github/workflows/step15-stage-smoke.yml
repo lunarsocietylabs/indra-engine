@@ -24,7 +24,17 @@ jobs:
               with urllib.request.urlopen(req,timeout=80) as r:
                   assert r.status==200, r.status
                   return r.read().decode("utf-8")
-          html=get("https://zelizuli-v15.omnisun.workers.dev/")
+          html=get("https://zelizuli.com/")
+          html_www=get("https://www.zelizuli.com/")
+          assert 'group=doc&limit=100' in html_www
+          assert html_www==html, "apex and www serve different site versions"
+          idx=json.loads(get("https://zelizuli.com/data/v4-preview/index.json"))
+          assert len(idx)==1196,len(idx)
+          assert len({x["id"] for x in idx})==1196
+          ids={x["id"] for x in idx}
+          assert {"T08n0251","X29n0596","T09n0262"}.issubset(ids)
+          page=json.loads(get("https://www.zelizuli.com/data/v4-preview/T08n0251.json"))
+          assert page["id"]=="T08n0251",page.get("id")
           assert 'SEARCH="https://zz-search.omnisun.workers.dev/api/search"' in html
           assert 'group=doc&limit=100' in html
           scripts=re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>",html,re.S)
@@ -35,6 +45,6 @@ jobs:
           assert d.get("nd",0)>=100, d.get("nd")
           assert d.get("has_more") is True
           assert len(d.get("docs",[]))==100
-          print("STAGE_OK bytes",len(html),"documents",d["nd"],"body_hits",d["n"])
+          print("PRODUCTION_OK apex+www bytes",len(html),"index",len(idx),"documents",d["nd"],"body_hits",d["n"])
           PY
           node --check /tmp/step15.js
