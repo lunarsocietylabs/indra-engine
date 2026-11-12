@@ -1,0 +1,40 @@
+name: step15-stage-smoke
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/step15-stage-smoke.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: step15-stage-smoke
+  cancel-in-progress: true
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read staged root and check JavaScript syntax
+        run: |
+          python3 - <<'PY'
+          import re, urllib.request, json
+          ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+          def get(url):
+              req=urllib.request.Request(url,headers={"User-Agent":ua,"Cache-Control":"no-cache"})
+              with urllib.request.urlopen(req,timeout=80) as r:
+                  assert r.status==200, r.status
+                  return r.read().decode("utf-8")
+          html=get("https://zelizuli-v15.omnisun.workers.dev/")
+          assert 'SEARCH="https://zz-search.omnisun.workers.dev/api/search"' in html
+          assert 'group=doc&limit=100' in html
+          scripts=re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>",html,re.S)
+          assert len(scripts)==1,len(scripts)
+          open("/tmp/step15.js","w",encoding="utf-8").write(scripts[0])
+          d=json.loads(get("https://zz-search.omnisun.workers.dev/api/search?q=%E5%87%86%E6%8F%90&group=doc&limit=100"))
+          assert d.get("ok") and d.get("group")=="doc"
+          assert d.get("nd",0)>=100, d.get("nd")
+          assert d.get("has_more") is True
+          assert len(d.get("docs",[]))==100
+          print("STAGE_OK bytes",len(html),"documents",d["nd"],"body_hits",d["n"])
+          PY
+          node --check /tmp/step15.js
