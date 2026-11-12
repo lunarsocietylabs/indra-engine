@@ -22,12 +22,13 @@ jobs:
         run: |
           python3 - <<'PY'
           import re, urllib.request
-          url="https://aicanon.omnisun.workers.dev/data/v4-preview/index-step15.html"
+          url="https://zelizuli-v15.omnisun.workers.dev/"
           ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/157.0.0.0 Safari/537.36"
           req=urllib.request.Request(url,headers={"User-Agent":ua})
           html=urllib.request.urlopen(req,timeout=60).read().decode("utf-8")
           assert 'zz-search.omnisun.workers.dev' in html
           assert 'group=doc&limit=100' in html
+          assert '<form class="find"' in html
           scripts=re.findall(r"<script(?:\\s[^>]*)?>(.*?)</script>",html,re.S)
           assert len(scripts)==1,len(scripts)
           open("/tmp/step15-fable.js","w",encoding="utf-8").write(scripts[0])
