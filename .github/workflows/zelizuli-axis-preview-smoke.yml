@@ -1,0 +1,45 @@
+name: zelizuli-axis-preview-smoke
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/zelizuli-axis-preview-smoke.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Verify isolated HTML demo and real corpus connections
+        run: |
+          python3 - <<'PY'
+          import json, re, urllib.request
+          from pathlib import Path
+          base = "https://aicanon.omnisun.workers.dev"
+          headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/157.0.0.0 Safari/537.36"}
+          def get(path):
+              with urllib.request.urlopen(urllib.request.Request(base+path,headers=headers),timeout=60) as resp:
+                  assert resp.status == 200, (path, resp.status)
+                  return resp.read()
+          html = get("/data/design-preview/axis-fusion-v1/index.html").decode()
+          assert 'id="axis-open"' in html and 'id="axis-panel"' in html
+          for p in ['data-axis="sects"','data-axis="texts"','data-axis="yana"','data-axis="bozh"']:
+              assert p in html, p
+          js = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", html, re.S)
+          assert len(js)>=2,len(js)
+          assert any("function renderBozh()" in s for s in js)
+          for i,s in enumerate(js):
+              Path("/tmp/axis-js-%02d.js"%i).write_text(s)
+          concept = json.loads(get("/data/concept_matrix.json"))
+          assert len(concept.get("concepts",{}))>=60
+          sutra = json.loads(get("/data/v4-preview/T08n0251.json"))
+          assert sutra["id"] == "T08n0251" and len(sutra["docs"])>=3
+          yana=json.loads(get("/data/yana.json"))
+          assert "判教视图" in yana
+          bo=json.loads(get("/data/tibetan/T12n0374.json"))
+          assert any(x.get("zh_lb")=="0365c06" and x.get("bo_unicode") for x in bo)
+          print("PASS: isolated preview HTML",len(html),"chars",len(js),"scripts","real V4/sect/yana/tibetan data")
+          PY
+          for js in /tmp/axis-js-*.js; do node --check "$js"; done
