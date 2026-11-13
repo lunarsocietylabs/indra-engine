@@ -1,0 +1,22 @@
+name: public-ip-boundary
+# Runs on public, free standard GitHub-hosted runner.
+# IMPORTANT: post-push checks cannot undo a disclosure; use required PR reviews/rulesets.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-ip-boundary-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect tracked source tree for protected V4 or credential material
+        run: python3 tools/check_public_boundary.py
