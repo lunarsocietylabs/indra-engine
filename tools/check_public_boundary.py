@@ -24,7 +24,7 @@ PRIVATE_PREFIXES = (
 SOURCE_PATHS = re.compile(r"^indra/v4_[A-Za-z0-9_]+[.]py$")
 TEST_PATHS = re.compile(r"^(?:tests/|indra/tests/)test_v4_[A-Za-z0-9_]+[.]py$")
 SENSITIVE_NAMES = re.compile(
-    r"(?i)(?:^|/)(?:[.]env(?:[.]|$)|id_rsa|id_ed25519|"
+    r"(?i)(?:^|/)(?:[.]env(?:[.][^/]*)?|id_rsa|id_ed25519|"
     r"[^/]+[.](?:pem|p12|pfx|key|safetensors|gguf|onnx|"
     r"pt|pth|pickle|pkl|parquet|sqlite|db|npz|npy|"
     r"tar|tgz|zip|7z|zst|r2|multipart))$"
