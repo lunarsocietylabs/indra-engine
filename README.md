@@ -84,3 +84,7 @@ This repository contains **no canon text**. Texts come from CBETA and other sour
 ## License
 
 GNU Affero General Public License v3.0. If you run a modified version as a network service, you must offer its source to the users of that service.
+
+## Source publication and commercial-use boundary
+
+This public V3 repository remains licensed under **AGPL-3.0**, which **permits commercial use** subject to its conditions. It does *not* grant any blanket rights to third-party Buddhist canon texts or private V4 source. For the disclosure boundary and the lightweight public-CI check, read [PUBLICATION-POLICY.md](PUBLICATION-POLICY.md) and run `python3 tools/check_public_boundary.py` before proposing code for publication.
