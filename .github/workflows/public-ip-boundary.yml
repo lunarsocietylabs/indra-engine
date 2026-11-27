@@ -7,6 +7,8 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 permissions:
   contents: read
 concurrency:
@@ -19,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Inspect tracked source tree for protected V4 or credential material
-        run: python3 tools/check_public_boundary.py
+        run: python3 tools/check_public_boundary.py --scan-dir "$GITHUB_WORKSPACE"
       - name: Verify guard catches known synthetic disclosure hazards
         run: python3 tools/test_public_boundary.py
+      - name: Verify isolated runtime with synthetic source fixtures
+        run: |
+          python3 tools/test_indra_runtime.py
+          python3 tools/test_private_runner.py

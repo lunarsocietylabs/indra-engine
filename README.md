@@ -88,3 +88,50 @@ GNU Affero General Public License v3.0. If you run a modified version as a netwo
 ## Source publication and commercial-use boundary
 
 This public V3 repository remains licensed under **AGPL-3.0**, which **permits commercial use** subject to its conditions. It does *not* grant any blanket rights to third-party Buddhist canon texts or private V4 source. For the disclosure boundary and the lightweight public-CI check, read [PUBLICATION-POLICY.md](PUBLICATION-POLICY.md) and run `python3 tools/check_public_boundary.py` before proposing code for publication.
+
+## Isolated private runtime
+
+`architecture/indra-runtime.json` pins the public base to a full Git commit.
+`tools/prepare_indra_runtime.py` reads that commit with `git archive` and combines
+it with the separately supplied private `engine/v4` source **outside both
+checkouts**. It keeps the complete `engine/v4` layout and overlays its Python
+modules/tests into the temporary runtime package. It does not move or modify the
+private source repository, publish code, fetch corpus data, or start computation.
+
+```sh
+python3 tools/prepare_indra_runtime.py \
+  --public-root /path/to/indra-engine \
+  --private-root /path/to/private-checkout \
+  --manifest architecture/indra-runtime.json \
+  --output /tmp/indra-runtime-new
+```
+
+Use `--private-archive /path/to/engine.tar` instead of `--private-root` for the
+existing private R2 package layout. The destination must be new, outside every
+Git checkout and outside the source inputs. Archive links, traversal, duplicate
+members and unrecognized private file types are rejected. The runtime has mode
+`0700`; its source-hash receipt is private and must never be committed.
+
+The manual `v4-shell` and `v4-batch` workflows still use the public standard
+Runner. They download into `RUNNER_TEMP`, explicitly fetch the pinned public
+commit, assemble there and run subprocesses with that runtime as their working
+directory. Logs and results go to private storage; public output contains fixed
+status messages. Cleanup runs after success or failure, and the public checkout
+is checked for untracked private files. Existing R2 package selections remain
+unchanged: shell uses `engine-v4`, batch uses `.github/engine_prefix`.
+
+Before publishing candidate changes:
+
+```sh
+python3 tools/check_public_boundary.py --scan-dir /path/to/clean-candidate
+python3 tools/check_public_boundary.py --staged
+python3 tools/test_public_boundary.py
+PYTHONDONTWRITEBYTECODE=1 python3 tools/test_indra_runtime.py
+```
+
+The first scan includes untracked files, JSON batch payloads and symlinks. The
+second reads the actual Git index blobs, so editing the working copy cannot hide
+sensitive staged content. Generated caches and virtual environments are not
+publication inputs. These checks enforce configured disclosure rules; they do
+not establish ownership or AGPL compliance. Existing AGPL notices, public
+history and any corresponding-source obligations remain unchanged.

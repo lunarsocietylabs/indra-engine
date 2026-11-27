@@ -19,7 +19,7 @@ A brief historical V4 exposure on 2026-11-10 in public commits #11/#12 remains p
 
 ## Guard and procedure
 
-1. Before any public commit, run `python3 tools/check_public_boundary.py` on the local checkout or a temporary clean clone.
+1. Before any public commit/API write, scan the exact clean candidate tree with `python3 tools/check_public_boundary.py --scan-dir PATH`; for a Git commit also run `python3 tools/check_public_boundary.py --staged` after staging. The latter reads the real index blobs, not the possibly different working copy.
 2. The lightweight `public-ip-boundary` GitHub Actions workflow runs on public push and pull requests, using the free standard `ubuntu-latest` Runner (no private project Actions pool, no Blacksmith, no Cloudflare Builds).
 3. **The post-push check is not a guarantee against disclosure**: if someone pushes directly, source can become public before CI fails. Require PR review and repository branch rulesets, or an upstream pre-publication review, for truly preventive control.
 4. Keep copyright ownership records and secure release decisions in the *private* project's `docs/legal/` directory, not in public workflow artifacts.
@@ -44,3 +44,37 @@ Official sources:
 - The scanner rejects known private V4 source identifiers even after a simple rename, unexpected private archives and model files, local `.env*` credentials, common token patterns, and large tracked files. **This is an error-catching helper, not a proof of non-disclosure.** A new sensitive implementation may have no matching signature.
 - The GitHub public standard Runner's `public-ip-boundary / check` job must PASS on PR. Strong enforcement requires an administrator-created branch ruleset. Repository rulesets were absent at last inspection, and the connected GitHub App lacks the Administration scope. A tested proposed rule lives in the private Zelizuli project, `docs/legal/INDRA_PUBLIC_MAIN_RULESET_IMPORT.json`; it is a **proposal, not active GitHub protection**.
 - Current version of the guard has passed seven synthetic negative test cases and a public tracked-tree scan in [GitHub Actions run 43385473274](https://github.com/lunarsocietylabs/indra-engine/actions/runs/43385473274).
+
+## Runtime and payload isolation (2026-11-27)
+
+The manual public-Runner workflows now assemble private execution separately:
+
+- `architecture/indra-runtime.json` records the exact public base commit and the
+  private source scope `engine/v4`. Runtime assembly uses that Git object, not a
+  moving branch or uncommitted public checkout content.
+- `tools/prepare_indra_runtime.py` accepts an authorized private checkout or the
+  existing private TAR bundle. It writes only to a new directory outside all
+  checkouts, rejects unsafe archive members/source links and preserves license
+  files/notices. Complete `engine/v4` source stays in the runtime; module/test
+  overlays also happen there. Source data is never overlaid into public Git.
+- Private source, plans, raw results and diagnostic logs stay under the private
+  runtime/download directories in `RUNNER_TEMP` or in private R2. Public logs
+  must not include payload snippets, exception details or private log tails.
+  `v4-report` only accepts its fixed aggregate reporting script.
+- Runtime and private download cleanup executes on success/failure and uses
+  fixed temporary locations even when environment export fails. Cleanup refuses
+  to remove a checkout or an unowned runtime. A failed private upload is reported
+  as failure; the public log does not claim that missing diagnostics were saved.
+- The checkout scan includes untracked files and rejects file/directory links,
+  concrete private batch-plan/result JSON and runtime provenance. It does not
+  exempt virtual environments or generated caches from publication checks.
+- Synthetic tests cover staged/working-copy differences, private payloads,
+  archive traversal/links/duplicates, source/output overlap, pinned-source use,
+  and failed environment export. These are local tests; this update does not
+  claim a new GitHub Actions execution or a full-canon production run.
+
+Runtime isolation is a source-disclosure control. The current private V4 uses
+public AGPL components, and some files retain AGPL notices and public history.
+This architecture neither relicenses those files nor proves that a combined
+program is exempt from AGPL requirements. Any future publication or relicensing
+decision still needs the existing private rights/dependency review.
