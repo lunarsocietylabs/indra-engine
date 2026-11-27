@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "public_base": {
+    "repository": "lunarsocietylabs/indra-engine",
+    "commit": "85762ae9f54501e6866ac797fb4996bd845f54bd"
+  },
+  "private_overlay": {
+    "root": "engine/v4"
+  }
+}

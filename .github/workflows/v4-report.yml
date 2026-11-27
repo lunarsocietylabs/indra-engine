@@ -3,10 +3,16 @@ on:
   workflow_dispatch:
     inputs:
       tag: {description: "batch run id", required: true}
-      script: {description: "script name", default: "v4_report.py"}
+      script:
+        description: Aggregate report only; payload diagnostics are not public logs
+        type: choice
+        options: [v4_report.py]
+        default: v4_report.py
 permissions:
   id-token: write
   contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 jobs:
   report:
     runs-on: ubuntu-latest
@@ -15,4 +21,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11'}
-      - run: python3 .github/scripts/${{ inputs.script }} ${{ inputs.tag }}
+      - name: Run only the aggregate report
+        env:
+          REPORT_SCRIPT: ${{ inputs.script }}
+          REPORT_TAG: ${{ inputs.tag }}
+        run: |
+          [ "$REPORT_SCRIPT" = "v4_report.py" ] || { echo 'Unsupported report script'; exit 2; }
+          python3 .github/scripts/v4_report.py "$REPORT_TAG"

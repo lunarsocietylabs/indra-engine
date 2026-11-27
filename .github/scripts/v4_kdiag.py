@@ -21,5 +21,4 @@ for f in plan[:120]:
                 if len(cands) < 4000: cands.append((d["id"], n["n"], labs[:4]))
             if n["type"] == "數": cnt["數·有头已解析"] += any(it["head"] for it in n["items"])
 print(dict(cnt))
-random.seed(1)
-for c in random.sample(cands, min(14, len(cands))): print(c[0], c[1], [l[:16] for l in c[2]])
+# Detailed labels remain in private storage; never print sample payloads here.
